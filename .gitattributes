@@ -1,0 +1,2 @@
+# Windows PowerShell 5.1 needs the files exactly as they are (CRLF, UTF-8 BOM): no line ending conversion.
+* -text

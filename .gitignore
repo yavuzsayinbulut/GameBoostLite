@@ -1,0 +1,9 @@
+# Personal reports of this PC
+battery-report.xml
+SYSTEM-AUDIT-*.md
+
+# Old backup and the blocked unsigned build
+_yedek-*/
+legacy/*.exe
+
+*.tmp
