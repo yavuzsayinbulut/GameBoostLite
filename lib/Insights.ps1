@@ -55,10 +55,10 @@ function Get-SystemAlerts {
     }
 
     if ((Get-RegistryValue 'HKCU:\Software\Microsoft\GameBar' 'AutoGameModeEnabled') -eq 0) {
-        $alerts.Add((New-Alert 'warning' 'Windows Oyun Modu kapalı' 'BOOST açar; kalıcı açmak için Optimize-Gaming.ps1 çalıştır.'))
+        $alerts.Add((New-Alert 'warning' 'Windows Oyun Modu kapalı' 'BOOST açar; kalıcı açmak için Oyun Ayarları sayfasını kullan.'))
     }
     if ((Get-RegistryValue 'HKCU:\System\GameConfigStore' 'GameDVR_Enabled') -eq 1) {
-        $alerts.Add((New-Alert 'warning' 'Arka plan oyun kaydı açık' 'Game DVR sürekli kayıt tutar ve FPS düşürür. Optimize-Gaming.ps1 kapatır.'))
+        $alerts.Add((New-Alert 'warning' 'Arka plan oyun kaydı açık' 'Game DVR sürekli kayıt tutar ve FPS düşürür. Oyun Ayarları sayfasından kapat.'))
     }
 
     $memory = [GameBoostEngine]::MemoryGb()
@@ -565,7 +565,7 @@ function Get-PingVerdict {
     return @('ok', 'Ağ oyun için uygun: düşük gecikme, kararlı bağlantı.')
 }
 
-# Admin scripts are written to the app folder and run only after the UAC prompt.
+# Admin scripts are built in memory and handed to the elevated PowerShell after the UAC prompt.
 function Get-WifiBackupPath { return Join-Path $script:settingsDirectory 'wifi-backup.json' }
 function Get-WifiResultPath { return Join-Path $script:settingsDirectory 'wifi-result.txt' }
 
@@ -580,42 +580,55 @@ function Save-WifiBackup {
         ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $path -Encoding UTF8
 }
 
+# Text going into the elevated script as a '...' literal; also escapes the typographic quotes
+# PowerShell accepts as single quotes.
+function ConvertTo-ScriptLiteral {
+    param([string]$Text)
+    return "'" + [Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($Text) + "'"
+}
+
 # Applies the values, then reads them back. The result goes to wifi-result.txt; the backup is
-# removed only when a revert is verified.
+# removed only when a revert is verified. The values may come from wifi-backup.json, which any
+# program of this user can edit, so nothing reaches the admin script unchecked or unquoted.
 function Get-WifiScriptLines {
     param([string]$Adapter, $Values, [string]$PowerScheme, [string]$RemoveBackupWhenVerified)
     $lines = [Collections.Generic.List[string]]::new()
     $adapterValues = [ordered]@{}
     $power = $null
+    $allowedKeywords = @($script:wifiRecommendations | ForEach-Object { $_.Keyword })
     foreach ($entry in $Values.GetEnumerator()) {
-        if ($entry.Key -eq 'PowerPlan') { $power = [int]$entry.Value } else { $adapterValues[$entry.Key] = [string]$entry.Value }
+        if ($entry.Key -eq 'PowerPlan') { $power = [int]$entry.Value }
+        elseif ($entry.Key -in $allowedKeywords) { $adapterValues[$entry.Key] = [string]$entry.Value }
     }
-    if (-not $PowerScheme) { $power = $null }
-    $resultPath = Get-WifiResultPath
+    $schemeGuid = [guid]::Empty
+    if ([guid]::TryParse($PowerScheme, [ref]$schemeGuid)) { $PowerScheme = $schemeGuid.ToString() }
+    else { $PowerScheme = $null; $power = $null }
+    $adapterLiteral = ConvertTo-ScriptLiteral $Adapter
+    $resultLiteral = ConvertTo-ScriptLiteral (Get-WifiResultPath)
     $powerQuery = "powercfg /query $PowerScheme $($script:wifiPowerSubgroup) $($script:wifiPowerSetting)"
 
     foreach ($entry in $adapterValues.GetEnumerator()) {
-        $lines.Add("Set-NetAdapterAdvancedProperty -Name '$Adapter' -RegistryKeyword '$($entry.Key)' -RegistryValue '$($entry.Value)' -NoRestart")
+        $lines.Add("Set-NetAdapterAdvancedProperty -Name $adapterLiteral -RegistryKeyword '$($entry.Key)' -RegistryValue $(ConvertTo-ScriptLiteral $entry.Value) -NoRestart")
     }
     if ($null -ne $power) {
         $lines.Add("powercfg /setacvalueindex $PowerScheme $($script:wifiPowerSubgroup) $($script:wifiPowerSetting) $power")
         $lines.Add("if ((powercfg /getactivescheme | Out-String) -match '$PowerScheme') { powercfg /setactive $PowerScheme }")
     }
     if ($adapterValues.Count -gt 0) {
-        $lines.Add("Restart-NetAdapter -Name '$Adapter'")
+        $lines.Add("Restart-NetAdapter -Name $adapterLiteral")
         $lines.Add('Start-Sleep -Seconds 3')
     }
     $lines.Add('$failed = @()')
     foreach ($entry in $adapterValues.GetEnumerator()) {
-        $lines.Add("if ([string](@((Get-NetAdapterAdvancedProperty -Name '$Adapter' -RegistryKeyword '$($entry.Key)').RegistryValue)[0]) -ne '$($entry.Value)') { `$failed += '$($entry.Key)' }")
+        $lines.Add("if ([string](@((Get-NetAdapterAdvancedProperty -Name $adapterLiteral -RegistryKeyword '$($entry.Key)').RegistryValue)[0]) -ne $(ConvertTo-ScriptLiteral $entry.Value)) { `$failed += '$($entry.Key)' }")
     }
     if ($null -ne $power) {
         $lines.Add("`$current = [regex]::Matches(($powerQuery | Out-String), '0x([0-9a-fA-F]{8})')")
         $lines.Add("if (`$current.Count -lt 1 -or [Convert]::ToInt32(`$current[0].Groups[1].Value, 16) -ne $power) { `$failed += 'PowerPlan' }")
     }
-    $success = "'ok' | Set-Content -LiteralPath '$resultPath' -Encoding ASCII"
-    if ($RemoveBackupWhenVerified) { $success += "; Remove-Item -LiteralPath '$RemoveBackupWhenVerified' -Force" }
-    $lines.Add("if (`$failed.Count -eq 0) { $success } else { ('failed: ' + (`$failed -join ', ')) | Set-Content -LiteralPath '$resultPath' -Encoding ASCII }")
+    $success = "'ok' | Set-Content -LiteralPath $resultLiteral -Encoding ASCII"
+    if ($RemoveBackupWhenVerified) { $success += "; Remove-Item -LiteralPath $(ConvertTo-ScriptLiteral $RemoveBackupWhenVerified) -Force" }
+    $lines.Add("if (`$failed.Count -eq 0) { $success } else { ('failed: ' + (`$failed -join ', ')) | Set-Content -LiteralPath $resultLiteral -Encoding ASCII }")
     return $lines
 }
 
@@ -631,16 +644,17 @@ function Show-WifiResult {
     else { Add-Log "Wi-Fi $Action kısmen başarısız ($($result -replace '^failed:\s*', '')). Yedek saklandı; Geri al ile dönebilirsin." }
 }
 
+# The script goes on the command line (-EncodedCommand), not into a file: a file in this user's
+# folder could be swapped by another program while the UAC prompt is open.
 function Invoke-AdminScript {
-    param([string[]]$Lines, [string]$Name)
+    param([string[]]$Lines)
     New-Item -ItemType Directory -Path $script:settingsDirectory -Force | Out-Null
-    $path = Join-Path $script:settingsDirectory "$Name.ps1"
     $content = @("`$ErrorActionPreference = 'Continue'") + $Lines
-    [IO.File]::WriteAllText($path, ($content -join "`r`n"), [Text.UTF8Encoding]::new($true))
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($content -join "`r`n"))
     try {
         # The result is read back from wifi-result.txt, so the elevated window can stay hidden.
         Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -ErrorAction Stop `
-            -ArgumentList @('-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $path + '"'))
+            -ArgumentList @('-NoProfile', '-WindowStyle', 'Hidden', '-EncodedCommand', $encoded)
         return $true
     } catch {
         Add-Log 'Yönetici izni verilmedi; değişiklik yapılmadı.'

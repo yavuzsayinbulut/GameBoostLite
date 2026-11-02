@@ -1,3 +1,5 @@
+# Restores a backup made by the retired Optimize-Gaming.ps1. These settings now live on the
+# Oyun Ayarlari page (own backup, "Hepsini eski haline dondur"); this script only exists for old backups.
 $ErrorActionPreference = 'Stop'
 $backupKey = 'HKCU:\Software\GameBoostLite\GamingBackup'
 

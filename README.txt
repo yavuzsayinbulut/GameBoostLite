@@ -20,9 +20,10 @@ KAPATMA VE SİSTEM TEPSİSİ
   BOOST'u geri alır (açıksa sorar); yeni kopya eskisi kapanınca pencereyle açılır.
 - Kısayola tekrar basmak, arka plandaki pencereyi öne getirir.
 - BOOST bitince geri alınanlar: güç planı, verimlilik modu, oyun önceliği.
-  Kalıcı olanlar: Windows Oyun Modu, oyun için GPU tercihi, "Koru" denen Hz,
-  uygulanan Wi-Fi ayarları (Geri al ile dönülür). Kapatılan uygulamalar kendi
-  kendine yeniden açılmaz.
+  Kalıcı olanlar: Windows Oyun Modu ve oyun için GPU tercihi (Oyun Ayarları >
+  "Hepsini eski haline döndür" ile geri alınır; oyuna önceden seçilmiş bir GPU
+  tercihi varsa ona dokunulmaz), "Koru" denen Hz, uygulanan Wi-Fi ayarları (Geri
+  al ile dönülür). Kapatılan uygulamalar kendi kendine yeniden açılmaz.
 
 SAYFALAR
 --------
@@ -54,8 +55,9 @@ OTOMATİK (Oyun Modu > Otomatik; üçü de başlangıçta kapalı)
   penceresiz bir komut yazar (yönetici gerekmez). Kapatınca silinir.
 - Başlangıçta tepside bekle: Windows ile açıldığında pencere görünmez.
 - Oyun algılanınca otomatik BOOST: Steam, Epic, EA, Ubisoft, Rockstar, Xbox
-  klasöründeki oyun 5 sn arayla iki kez görülünce başlar. Launcher, yükleyici
-  ve crash handler başlatmaz. Soru sormaz, hiçbir uygulamayı kapatmaz; yalnızca
+  klasöründeki oyun 5 sn arayla iki kez görülünce başlar. Launcher, yükleyici,
+  crash handler ve Steam araçları (Wallpaper Engine, SteamVR, Lossless Scaling,
+  Soundpad) başlatmaz; BOOST sırasında da oyun sayılmazlar. Soru sormaz, hiçbir uygulamayı kapatmaz; yalnızca
   güç planı (pilde değiştirmez), Oyun Modu, verimlilik modu ve (ayarı açıksa)
   Game Bar. NORMAL MOD'a basılırsa o oyun kapanana kadar tekrar başlamaz.
   İzleme 5 sn'de bir tek süreç taraması yapar ve yalnızca bu ayar açıkken çalışır.
@@ -110,7 +112,8 @@ MİKROFON (Ses sayfası)
 ----------------------
 - 5 sn mikrofon testi: konuşurken seviyeyi ölçer (konuşma, tepe, gürültü);
   "çok düşük / düşük / iyi / çok yüksek" der. Kayıt saklanmaz.
-- Seviyeyi %100 yap / Önceki seviyeye dön (Windows mikrofon seviyesi).
+- Seviyeyi %100 yap / Önceki seviyeye dön (Windows mikrofon seviyesi; önceki
+  seviye uygulama kapansa da saklanır).
 - Uyarılar: mikrofon sessizde, seviye düşük, kulaklık mikrofonu takılı ama
   sohbet varsayılanı dahili mikrofon, masaüstü uygulamalarının mikrofon izni kapalı.
 
@@ -221,8 +224,9 @@ YÖNETİCİ GEREKTİRENLER (her biri UAC sorar)
   %LOCALAPPDATA%\GameBoostLite\wifi-backup.json dosyasına yedeklenir;
   "Geri al" ile dönülür. Wi-Fi birkaç saniye kopar.
 - FPS ölçümü için bir kez (yönetici PowerShell):
-    Add-LocalGroupMember -SID S-1-5-32-559 -Member <kullanıcı adın>
-  sonra oturumu kapatıp aç. FPS / HUD sayfasındaki düğme komutu kopyalar.
+    Add-LocalGroupMember -SID S-1-5-32-559 -Member <kullanıcı SID'in>
+  sonra oturumu kapatıp aç. FPS / HUD sayfasındaki düğme komutu senin SID'inle
+  kopyalar. Geri almak için aynı komutu Remove-LocalGroupMember ile çalıştır.
 
 GÜVENLİ TEMİZLE
 ---------------
@@ -234,15 +238,18 @@ dokunulmaz.
 FPS / HUD
 ---------
 F10 göstergeyi 10 sn açar, Ctrl+F10 kalıcı açar/kapatır. Tuşlar yalnızca
-gösterge etkinken kaydedilir. Gösterge ayrı, tıklamaları engellemeyen bir
+gösterge etkinken ve BOOST açıkken kaydedilir; diğer zamanlarda F10 öteki
+uygulamalara (ör. VS Code'da Step Over) serbesttir. FPS / HUD sayfasındaki
+düğmeler her zaman çalışır. Gösterge ayrı, tıklamaları engellemeyen bir
 penceredir; oyuna DLL enjekte edilmez. Oyunun açık olduğu ekranda belirir.
 
 BAŞLANGIÇ VE OYUN AYARLARI BETİKLERİ
 ------------------------------------
-Optimize-Startup.ps1 / Restore-Startup.ps1: launcher, Docker, Teams, Edge ve
-DAEMON Tools'un Windows açılışında başlamasını kapatır / geri getirir.
-Optimize-Gaming.ps1 / Restore-Gaming.ps1: Oyun Modu'nu açar, arka plan
-Game DVR kaydını kapatır / önceki değerlere döner.
+Optimize-Startup.ps1 / Restore-Startup.ps1: launcher, Docker, Teams, Discord,
+Edge ve DAEMON Tools'un Windows açılışında başlamasını kapatır / geri getirir.
+Oyun Modu ve arka plan Game DVR kaydı artık yalnızca Oyun Ayarları sayfasından
+yönetilir (tek yedek). Restore-Gaming.ps1 yalnızca eski Optimize-Gaming.ps1
+yedeğini geri yüklemek için duruyor.
 
 DOSYALAR
 --------

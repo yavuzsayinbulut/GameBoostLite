@@ -146,7 +146,7 @@ $script:hotkeyFilter.Add_Pressed({
 })
 [Windows.Forms.Application]::AddMessageFilter($script:hotkeyFilter)
 [void]$form.Handle
-Set-OverlayHotkeys $script:overlayEnabled
+Update-OverlayHotkeys
 
 $script:showSignal = [GameBoostShowSignal]::new('Local\GameBoostLite.Show', $form)
 $script:showSignal.Add_Signaled({ Show-FromTray })

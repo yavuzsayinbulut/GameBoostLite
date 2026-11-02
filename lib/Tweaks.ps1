@@ -4,6 +4,7 @@
 
 $script:tweakBackupFile = Join-Path $script:settingsDirectory 'windows-settings-backup.json'
 $script:gpuPreferencesPath = 'HKCU:\Software\Microsoft\DirectX\UserGpuPreferences'
+$script:gpuPreferencesSubkey = 'Software\Microsoft\DirectX\UserGpuPreferences'
 
 $script:windowsTweaks = @(
     [pscustomobject]@{
@@ -171,6 +172,46 @@ function Restore-Tweak {
         if ($backup.ContainsKey($Tweak.Key)) { $backup.Remove($Tweak.Key); Write-TweakBackup $backup }
         return $true
     } catch { return $false }
+}
+
+# ---------------------------------------------------------------- GPU preference of detected games
+
+# BOOST asks Windows to run a detected game on the high performance GPU. A choice already made for
+# that game is left alone; the games BOOST set are listed in the backup so they can be put back.
+# The registry is used directly: game paths may contain [ ], which -Name treats as wildcards.
+function Set-GameGpuPreference {
+    param([string]$Path)
+    try {
+        $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($script:gpuPreferencesSubkey)
+        try {
+            if ($null -ne $key.GetValue($Path)) { return $true }
+            $backup = Read-TweakBackup
+            $backup['GameGpuPaths'] = @(@($backup['GameGpuPaths']) + $Path | Where-Object { $_ } | Sort-Object -Unique)
+            Write-TweakBackup $backup
+            $key.SetValue($Path, 'GpuPreference=2;', [Microsoft.Win32.RegistryValueKind]::String)
+            return $true
+        } finally { $key.Dispose() }
+    } catch { return $false }
+}
+
+# Removes the preferences BOOST added, except the ones the user has changed since.
+function Restore-GameGpuPreferences {
+    $backup = Read-TweakBackup
+    if (-not $backup.ContainsKey('GameGpuPaths')) { return 0 }
+    $removed = 0
+    try {
+        $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($script:gpuPreferencesSubkey, $true)
+        if ($key) {
+            try {
+                foreach ($path in @($backup['GameGpuPaths'])) {
+                    if ([string]$key.GetValue($path) -eq 'GpuPreference=2;') { $key.DeleteValue($path, $false); $removed++ }
+                }
+            } finally { $key.Dispose() }
+        }
+        $backup.Remove('GameGpuPaths')
+        Write-TweakBackup $backup
+    } catch { }
+    return $removed
 }
 
 # ---------------------------------------------------------------- noise suppression helpers on this PC

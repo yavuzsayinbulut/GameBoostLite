@@ -95,14 +95,15 @@ $script:protectedCloseNames = New-NameSet @(
 )
 
 # Background apps that get efficiency mode during BOOST. Bringing one to the front undoes it.
+# Chat apps are not here: a call during a game must not turn choppy.
 $script:efficiencyNames = New-NameSet @(
-    'chrome', 'msedge', 'firefox', 'brave', 'opera', 'Code', 'ms-teams', 'Teams', 'Slack',
-    'Notion', 'Figma', 'WhatsApp', 'Telegram', 'claude', 'OneDrive', 'Dropbox', 'GoogleDriveFS',
+    'chrome', 'msedge', 'firefox', 'brave', 'opera', 'Code',
+    'Notion', 'Figma', 'claude', 'OneDrive', 'Dropbox', 'GoogleDriveFS',
     'PhoneExperienceHost', 'Widgets', 'WidgetService', 'Docker Desktop', 'com.docker.backend'
 )
 
-# Never slowed down: voice, music, streaming, peripherals, overlays, anti-cheat, our own helpers.
-$script:neverThrottlePattern = '^(obs|Streamlabs|XSplit|vlc|mpc-|PotPlayer|ts3client|TeamSpeak|mumble|voicemeeter|SteelSeries|lghub|Razer|iCUE|Corsair|MSIAfterburner|RTSS|EncoderServer|HWiNFO|Overwolf|Medal|nvidia|NV|PresentMon|Discord|Spotify)|audio|sound|voice|sonar|nahimic|dolby|anticheat|battleye|faceit|vanguard|^vg|ricochet|xigncode|gameguard|nprotect|crash'
+# Never slowed down: voice, chat, music, streaming, peripherals, overlays, anti-cheat, our own helpers.
+$script:neverThrottlePattern = '^(obs|Streamlabs|XSplit|vlc|mpc-|PotPlayer|ts3client|TeamSpeak|mumble|voicemeeter|SteelSeries|lghub|Razer|iCUE|Corsair|MSIAfterburner|RTSS|EncoderServer|HWiNFO|Overwolf|Medal|nvidia|NV|PresentMon|Discord|Spotify|Teams|ms-teams|Slack|WhatsApp|Telegram|Zoom|Skype|Signal)|audio|sound|voice|sonar|nahimic|dolby|anticheat|battleye|faceit|vanguard|^vg|ricochet|xigncode|gameguard|nprotect|crash'
 $script:neverThrottlePathPattern = '^[A-Za-z]:\\Windows\\|\\WindowsApps\\|\\(NVIDIA Corporation|NVIDIA|Realtek|Intel|AMD|HP|HP Inc|OMEN|SteelSeries|Logitech|LGHUB|Razer|Corsair|ASUS|MSI|Dolby|Nahimic|Waves|Steam|Epic Games|EA|Electronic Arts|Ubisoft|Rockstar Games|GOG Galaxy|Battle\.net|Riot Games)\\'
 
 # Fullscreen apps that are not games.
@@ -175,12 +176,15 @@ function Save-RuntimeState {
         $efficiency = @($script:efficiencyTargets.Values | ForEach-Object {
             [ordered]@{ Id = $_.Id; CreateTime = [string]$_.CreateTime; Priority = $_.Priority; Control = $_.Control; State = $_.State }
         })
+        # Temp file first, then swapped in: a crash mid-write must not lose the power plan to restore.
+        $temp = "$($script:runtimeStateFile).tmp"
         [ordered]@{
             BoostActive = $true
             PreviousPowerScheme = $script:previousPowerScheme
             Efficiency = $efficiency
             SavedAt = (Get-Date).ToString('o')
-        } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $script:runtimeStateFile -Encoding UTF8
+        } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $temp -Encoding UTF8
+        Move-Item -LiteralPath $temp -Destination $script:runtimeStateFile -Force
     } catch { }
 }
 
@@ -221,11 +225,10 @@ function Restore-StaleBoostState {
     }
 }
 
+# Through the Oyun Ayarları backup, so "Hepsini eski haline döndür" puts the original value back.
 function Enable-GameMode {
-    $gameBar = 'HKCU:\Software\Microsoft\GameBar'
-    New-Item $gameBar -Force | Out-Null
-    New-ItemProperty $gameBar -Name AutoGameModeEnabled -Value 1 -PropertyType DWord -Force | Out-Null
-    New-ItemProperty $gameBar -Name AllowAutoGameMode -Value 1 -PropertyType DWord -Force | Out-Null
+    $tweak = $script:windowsTweaks | Where-Object Key -eq 'GameMode' | Select-Object -First 1
+    if (-not (Test-TweakOn $tweak)) { [void](Enable-Tweak $tweak) }
 }
 
 # ---------------------------------------------------------------- closing apps
@@ -456,13 +459,7 @@ function Register-DetectedGame {
     if (-not [GameBoostEngine]::TrySetPriority($Id, $CreateTime, 0x8000)) {
         Add-Log 'Oyun önceliği değiştirilemedi (anti-cheat koruması olabilir).'
     }
-    if ($Path) {
-        try {
-            $gpuKey = 'HKCU:\Software\Microsoft\DirectX\UserGpuPreferences'
-            New-Item $gpuKey -Force | Out-Null
-            New-ItemProperty $gpuKey -Name $Path -Value 'GpuPreference=2;' -PropertyType String -Force | Out-Null
-        } catch { Add-Log 'Yüksek performanslı GPU tercihi kaydedilemedi.' }
-    }
+    if ($Path -and -not (Set-GameGpuPreference $Path)) { Add-Log 'Yüksek performanslı GPU tercihi kaydedilemedi.' }
     [void](Restore-EfficiencyTargets $Name)
     Set-CurrentGameFile $Id $Name
     Add-SessionGame $Id $Name
@@ -797,6 +794,7 @@ function Update-BoostUi {
         $script:sidebarStatus.Text = '●  NORMAL MOD'
         $script:sidebarStatus.ForeColor = $script:theme.Blue
     }
+    Update-OverlayHotkeys
     Update-ModesUi
     Update-Metrics
 }
@@ -931,6 +929,8 @@ function Restore-NormalMode {
     $script:boostMode = $null
     [GameBoostEngine]::ResetActivity()
     Update-BoostUi
+    # F10 / Ctrl+F10 are released with BOOST; a persistent HUD would be left with no key to close it.
+    Stop-ExternalOverlay
     if ($restored -gt 0) { Add-Log "$restored süreç normal hızına döndü." }
     Add-Log $Reason
     Update-AutoBoostWatcher
@@ -982,6 +982,9 @@ function Set-OverlayHotkeys {
         if ($script:ctrlF10Registered) { [void][GameBoostHotkeyNative]::UnregisterHotKey($form.Handle, 5102); $script:ctrlF10Registered = $false }
     }
 }
+
+# F10 is a system-wide key (Step Over, menu bar), so the HUD holds it only while BOOST runs.
+function Update-OverlayHotkeys { Set-OverlayHotkeys ($script:overlayEnabled -and $script:boosted) }
 
 function Invoke-OverlayCommand {
     param([ValidateSet('Show10', 'Toggle')][string]$Command)

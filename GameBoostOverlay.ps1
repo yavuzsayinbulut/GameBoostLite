@@ -281,6 +281,9 @@ function Get-GameProcess {
         if (-not $path) { continue }
         $path = $path.ToLowerInvariant()
         if ($path.Contains('\steamworks shared\') -or $path.Contains('\_commonredist\') -or $path.Contains('\redist\')) { continue }
+        # Steam tools that are not games (same list as GameBoostEngine.IsGameLibraryPath).
+        if ($path.Contains('\steamapps\common\wallpaper_engine\') -or $path.Contains('\steamapps\common\steamvr\') -or
+            $path.Contains('\steamapps\common\lossless scaling\') -or $path.Contains('\steamapps\common\soundpad\')) { continue }
         $known =
             $path.Contains('\steamapps\common\') -or
             ($path.Contains('\epic games\') -and -not $path.Contains('\launcher\')) -or

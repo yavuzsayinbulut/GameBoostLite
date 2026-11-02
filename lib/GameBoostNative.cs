@@ -58,6 +58,12 @@ public static class GameBoostEngine {
     const uint BelowNormalPriority = 0x4000;
 
     public static readonly HashSet<string> ExcludedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    // Steam tools that run next to a game for hours (live wallpaper, VR runtime, frame generation,
+    // soundboard). Counted as games, they would keep BOOST on after the real game closes.
+    static readonly string[] NonGameSteamFolders = {
+        "\\steamapps\\common\\wallpaper_engine\\", "\\steamapps\\common\\steamvr\\",
+        "\\steamapps\\common\\lossless scaling\\", "\\steamapps\\common\\soundpad\\"
+    };
     // System processes whose CPU time is read for the session summary (Windows Update, Defender).
     public static readonly HashSet<string> SystemWatchNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -239,6 +245,9 @@ public static class GameBoostEngine {
             p.Contains("\\ubisoft game launcher\\games\\") ||
             (p.Contains("\\rockstar games\\") && !p.Contains("\\launcher\\"));
         if (!known) return false;
+        foreach (string folder in NonGameSteamFolders) {
+            if (p.Contains(folder)) return false;
+        }
         // Installers and helpers that live inside game folders are not the game.
         return !(p.Contains("crashreport") || p.Contains("anticheat") || p.Contains("crashhandler") ||
                  p.Contains("\\steamworks shared\\") || p.Contains("\\_commonredist\\") || p.Contains("\\redist\\"));

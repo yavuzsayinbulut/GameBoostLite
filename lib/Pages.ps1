@@ -545,10 +545,11 @@ function Enable-AllTweaks {
 function Restore-AllTweaks {
     $backup = Read-TweakBackup
     $saved = @($script:windowsTweaks | Where-Object { $backup.ContainsKey($_.Key) })
-    if ($saved.Count -eq 0) { Add-Log 'GameBoost hiçbir Windows ayarını değiştirmemiş.'; return }
+    if ($saved.Count -eq 0 -and -not $backup.ContainsKey('GameGpuPaths')) { Add-Log 'GameBoost hiçbir Windows ayarını değiştirmemiş.'; return }
     $restored = 0
     foreach ($tweak in $saved) { if (Restore-Tweak $tweak) { $restored++ } }
-    Add-Log "$restored ayar GameBoost öncesi değerine döndü."
+    $games = Restore-GameGpuPreferences
+    Add-Log "$restored ayar GameBoost öncesi değerine döndü$(if ($games -gt 0) { "; $games oyunun GPU tercihi kaldırıldı" })."
     Update-TweaksPage
 }
 
@@ -726,15 +727,20 @@ function Start-UsbCQuery {
 
 function Set-DisplayTopology {
     param([ValidateSet('external', 'extend', 'clone', 'internal')][string]$Mode)
-    $external = @($script:displayMonitors | Where-Object { -not $_.Internal })
-    if ($Mode -ne 'internal' -and $external.Count -eq 0 -and @($script:displayMonitors).Count -le 1) {
-        [void](Show-UiMessage 'Harici ekran bağlı görünmüyor. Kabloyu taktıktan sonra Yenile''ye bas.')
-        return
-    }
+    # No check beforehand: after "Yalnızca laptop" the external screen is inactive and not listed,
+    # and DisplaySwitch does nothing when no second screen is connected. Checked afterwards instead.
     $names = @{ external = 'Yalnızca harici ekran'; extend = 'Genişlet'; clone = 'Çoğalt'; internal = 'Yalnızca laptop ekranı' }
     Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\DisplaySwitch.exe') -ArgumentList "/$Mode"
     Add-Log "Ekran düzeni: $($names[$Mode])."
-    Start-DelayedAction 3500 { if ($script:currentPage -eq 'display') { Update-DisplayPage } }
+    $script:requestedTopology = $Mode
+    Start-DelayedAction 3500 {
+        $monitors = @([GameBoostDisplay]::GetMonitors())
+        $external = @($monitors | Where-Object { -not $_.Internal })
+        if ($script:requestedTopology -ne 'internal' -and $external.Count -eq 0 -and $monitors.Count -le 1) {
+            Add-Log 'Harici ekran bulunamadı; kabloyu ve ekranın açık olduğunu kontrol et.'
+        }
+        if ($script:currentPage -eq 'display') { Update-DisplayPage }
+    }
 }
 
 function Show-RefreshConfirm {
@@ -864,6 +870,13 @@ function Show-MicTestResult {
     Add-Log ("Mikrofon testi: {0}" -f ($text -split "`r`n")[0])
 }
 
+# The level before "%100 yap" is also kept on disk, so "Önceki seviyeye dön" survives a restart.
+$script:micUndoFile = Join-Path $script:settingsDirectory 'mic-level-backup.json'
+$script:micLevelUndo = $null
+if (Test-Path -LiteralPath $script:micUndoFile) {
+    try { $script:micLevelUndo = Get-Content -LiteralPath $script:micUndoFile -Raw | ConvertFrom-Json } catch { }
+}
+
 function Set-MicLevelFull {
     $microphone = Get-DefaultMicrophone
     if (-not $microphone) { return }
@@ -872,6 +885,10 @@ function Set-MicLevelFull {
     # Keep the first value so repeated presses still undo to the original level.
     if (-not $script:micLevelUndo -or $script:micLevelUndo.Id -ne $microphone.Id) {
         $script:micLevelUndo = [pscustomobject]@{ Id = $microphone.Id; Level = $previous; Name = $microphone.Name }
+        try {
+            New-Item -ItemType Directory -Path $script:settingsDirectory -Force | Out-Null
+            $script:micLevelUndo | ConvertTo-Json | Set-Content -LiteralPath $script:micUndoFile -Encoding UTF8
+        } catch { }
     }
     Add-Log ('Mikrofon seviyesi %100 yapıldı (önceki %{0:0}).' -f ($script:micLevelUndo.Level * 100))
     Update-AudioPage
@@ -883,6 +900,7 @@ function Undo-MicLevel {
     if ([GameBoostAudio]::SetEndpointVolume($undo.Id, $undo.Level) -ge 0) {
         Add-Log ('Mikrofon seviyesi önceki değere döndü (%{0:0}).' -f ($undo.Level * 100))
         $script:micLevelUndo = $null
+        Remove-Item -LiteralPath $script:micUndoFile -Force -ErrorAction SilentlyContinue
     } else { Add-Log 'Mikrofon seviyesi geri alınamadı; aygıt çıkarılmış olabilir.' }
     Update-AudioPage
 }
@@ -1118,7 +1136,7 @@ function Invoke-WifiFix {
     if ((Show-UiMessage $message 'Wi-Fi ayarları' 'YesNo' 'Question') -ne 'Yes') { return }
     Save-WifiBackup $info
     Remove-Item -LiteralPath (Get-WifiResultPath) -Force -ErrorAction SilentlyContinue
-    if (Invoke-AdminScript (Get-WifiScriptLines $info.Wifi.Name (Get-PendingWifiValues) $info.PowerScheme) 'wifi-apply') {
+    if (Invoke-AdminScript (Get-WifiScriptLines $info.Wifi.Name (Get-PendingWifiValues) $info.PowerScheme)) {
         Add-Log "Wi-Fi ayarları uygulanıyor: $(@($pending.Label) -join ', ')."
         Start-DelayedAction 15000 { Show-WifiResult 'ayarları'; Update-NetworkPage; Update-HomeAlerts }
     }
@@ -1135,7 +1153,7 @@ function Invoke-WifiRevert {
     # The elevated script deletes the backup itself, only after the old values are read back.
     $scheme = if ($backup.PowerScheme) { [string]$backup.PowerScheme } else { $null }
     Remove-Item -LiteralPath (Get-WifiResultPath) -Force -ErrorAction SilentlyContinue
-    if (Invoke-AdminScript (Get-WifiScriptLines $backup.Adapter $values $scheme $path) 'wifi-revert') {
+    if (Invoke-AdminScript (Get-WifiScriptLines $backup.Adapter $values $scheme $path)) {
         Add-Log 'Wi-Fi ayarları eski değerlerine döndürülüyor.'
         Start-DelayedAction 15000 { Show-WifiResult 'geri alma'; Update-NetworkPage; Update-HomeAlerts }
     }
@@ -1579,26 +1597,28 @@ function Build-HudPage {
     $page = New-Page 'hud' 'FPS / HUD' 'Oyun içinde FPS, GPU, CPU ve RAM göstergesi. Oyuna müdahale etmez.' 0xEC4A { param($Page) Update-HudPage }
     $card = New-UiCard $page 'Oyun içi gösterge' 28 88 520 420
     $script:overlayToggle = New-UiToggle $card 'Performans göstergesini etkinleştir' 18 48 480 $script:overlayEnabled `
-        'Kapalıyken F10 tuşu diğer uygulamalara serbest kalır ve hiçbir ölçüm çalışmaz.'
+        'F10 yalnızca BOOST açıkken göstergenindir; kapalıyken hiçbir ölçüm çalışmaz.'
     $script:overlayToggle.Add_CheckedChanged({
         $script:overlayEnabled = $script:overlayToggle.Checked
         $script:overlayPrompted = $true
-        Set-OverlayHotkeys $script:overlayEnabled
+        Update-OverlayHotkeys
         if (-not $script:overlayEnabled) { Stop-ExternalOverlay }
         Save-CustomSettings -Quiet
         Update-HudPage
     })
     $keys = New-UiKeyValues $card @('F10', 'Ctrl + F10', 'Gösterilenler') 18 98 120 362 28
-    Set-UiValue $keys 'F10' 'Göstergeyi 10 saniye aç'
-    Set-UiValue $keys 'Ctrl + F10' 'Kalıcı aç / kapat'
+    Set-UiValue $keys 'F10' 'Göstergeyi 10 saniye aç (BOOST açıkken)'
+    Set-UiValue $keys 'Ctrl + F10' 'Kalıcı aç / kapat (BOOST açıkken)'
     Set-UiValue $keys 'Gösterilenler' 'FPS, kare süresi, GPU %, sıcaklık, VRAM, CPU, RAM'
     $script:hudStatus = New-UiLabel $card '' 18 192 480 64 -Wrap
     [void](New-UiButton $card '10 sn test et' 18 268 150 36 -OnClick { Invoke-OverlayCommand 'Show10' })
     [void](New-UiButton $card 'Kalıcı aç / kapat' 178 268 160 36 -OnClick { Invoke-OverlayCommand 'Toggle' })
     $script:hudCopyButton = New-UiButton $card 'FPS yetki komutunu kopyala' 18 318 320 36 $script:theme.Accent {
-        Copy-UiText "Add-LocalGroupMember -SID S-1-5-32-559 -Member $env:USERNAME" 'FPS yetki komutu'
+        # The user's SID instead of the name: names with spaces or quotes would break the command.
+        $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        Copy-UiText "Add-LocalGroupMember -SID S-1-5-32-559 -Member $sid" 'FPS yetki komutu'
     }
-    $script:hudCopyHint = New-UiLabel $card 'Komutu bir kez yönetici PowerShell''de çalıştır, sonra oturumu kapatıp aç.' 18 362 480 36 `
+    $script:hudCopyHint = New-UiLabel $card 'Bir kez yönetici PowerShell''de çalıştır, oturumu kapatıp aç. Geri almak için Add yerine Remove-LocalGroupMember yaz.' 18 362 480 36 `
         -Color $script:theme.Muted -Font $script:fonts.Small -Wrap
 
     $how = New-UiCard $page 'Nasıl çalışır' 564 88 372 420
