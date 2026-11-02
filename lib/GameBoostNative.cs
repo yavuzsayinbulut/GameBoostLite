@@ -1715,6 +1715,24 @@ public static class GameBoostSystemState {
         PowerStatus status;
         return GetSystemPowerStatus(out status) && status.SystemStatusFlag == 1;
     }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct BatteryState {
+        public byte AcOnLine, BatteryPresent, Charging, Discharging, Spare1, Spare2, Spare3, Tag;
+        public uint MaxCapacity, RemainingCapacity;
+        public int Rate;
+        public uint EstimatedTime, DefaultAlert1, DefaultAlert2;
+    }
+    [DllImport("powrprof.dll")] static extern uint CallNtPowerInformation(int level, IntPtr input, int inputLength, out BatteryState output, int outputLength);
+
+    // { remaining mWh, full mWh, rate mW (negative while draining, 0 when Windows does not know) },
+    // or null without a battery. Microseconds, unlike the WMI battery classes.
+    public static double[] Battery() {
+        BatteryState state;
+        if (CallNtPowerInformation(5, IntPtr.Zero, 0, out state, Marshal.SizeOf(typeof(BatteryState))) != 0 || state.BatteryPresent == 0) return null;
+        int rate = state.Rate == int.MinValue ? 0 : state.Rate;
+        return new double[] { state.RemainingCapacity, state.MaxCapacity, rate };
+    }
 }
 
 // ---------------------------------------------------------------- internet speed test

@@ -49,9 +49,18 @@ function Set-Brightness {
     } catch { return $false }
 }
 
+# Windows' own battery call first (microseconds on the UI thread); WMI only if it has no answer.
 function Get-BatteryCapacity {
+    $state = [GameBoostSystemState]::Battery()
+    if ($state -and $state[0] -gt 0) { return $state[0] }
     try { return [double](Get-CimInstance -Namespace root/wmi -ClassName BatteryStatus -ErrorAction Stop | Select-Object -First 1).RemainingCapacity }
     catch { return -1 }
+}
+
+function Get-BatteryRate {
+    $state = [GameBoostSystemState]::Battery()
+    if ($state) { return $state[2] }
+    return 0
 }
 
 function Test-WifiConnected {
@@ -305,7 +314,9 @@ function Read-SteamManifest {
 function Get-ActiveDownloads {
     $items = [Collections.Generic.List[object]]::new()
     foreach ($library in (Get-SteamLibraries)) {
-        foreach ($folder in @(Get-ChildItem -LiteralPath (Join-Path $library 'steamapps\downloading') -Directory -ErrorAction SilentlyContinue)) {
+        $downloading = Join-Path $library 'steamapps\downloading'
+        if (-not [IO.Directory]::Exists($downloading)) { continue }
+        foreach ($folder in @(Get-ChildItem -LiteralPath $downloading -Directory -ErrorAction SilentlyContinue)) {
             if ($folder.Name -notmatch '^\d+$') { continue }
             $path = Join-Path $library "steamapps\appmanifest_$($folder.Name).acf"
             $manifest = Read-SteamManifest $path
@@ -313,7 +324,8 @@ function Get-ActiveDownloads {
             $items.Add([pscustomobject]@{ Key = "steam:$($folder.Name)"; Source = 'Steam'; Name = $name; Done = [double]$manifest.Done; Total = [double]$manifest.Total; Path = $path })
         }
     }
-    foreach ($item in @(Get-ChildItem -LiteralPath (Get-EpicManifestFolder) -Filter '*.item' -ErrorAction SilentlyContinue)) {
+    $epic = Get-EpicManifestFolder
+    foreach ($item in @(if ([IO.Directory]::Exists($epic)) { Get-ChildItem -LiteralPath $epic -Filter '*.item' -ErrorAction SilentlyContinue })) {
         try { $json = [IO.File]::ReadAllText($item.FullName) | ConvertFrom-Json } catch { continue }
         if (-not $json.bIsIncompleteInstall) { continue }
         $items.Add([pscustomobject]@{ Key = "epic:$($json.AppName)"; Source = 'Epic'; Name = $json.DisplayName; Done = 0.0; Total = [double]$json.InstallSize; Path = $item.FullName })
@@ -516,6 +528,8 @@ function New-PlanSpeedTest {
 function Start-PlanSpeedCheck {
     $mode = $script:download
     if (-not $mode -or $mode.PlanChecked -or $script:speedTest -or $script:planTest) { return }
+    # Never while a game runs: a full line for 10 s is a lag spike online. Tried again later.
+    if ($script:boosted -or [GameBoostEngine]::IsForegroundFullscreen()) { return }
     $mode.PlanChecked = $true
     if ($script:lastSpeedResult -and ((Get-Date) - $script:lastSpeedResult.At).TotalDays -le 7) { return }
     if ($mode.Metered -or $mode.RateDown -ge 1 -or $mode.RateUp -ge 1) {
@@ -764,6 +778,13 @@ function Update-BatteryMeter {
 }
 
 function Get-BatteryEstimate {
+    # Some laptops report the drain themselves: use it at once.
+    $rate = Get-BatteryRate
+    if ($rate -lt 0 -and (Test-OnBattery)) {
+        $capacity = Get-BatteryCapacity
+        $watts = -$rate / 1000
+        if ($capacity -gt 0) { return [pscustomobject]@{ Watts = [math]::Round($watts, 1); Hours = $capacity / 1000 / $watts; Minutes = 0 } }
+    }
     if ($script:batterySamples.Count -lt 2) { return $null }
     $first = $script:batterySamples[0]; $last = $script:batterySamples[$script:batterySamples.Count - 1]
     $hours = ($last.At - $first.At).TotalHours
@@ -870,7 +891,7 @@ function Invoke-NoticeChecks {
     # (with the automatic start on, it has already been switched on instead).
     if (-not $script:download -and -not $script:options.DownloadAutoStart) {
         $recent = (Get-Date).AddMinutes(-5)
-        $active = @(Get-ActiveDownloads | Where-Object { $_.Source -in 'Steam', 'Epic' -or ($_.Done -ge 50MB -and $_.Modified -ge $recent) })
+        $active = @(Get-ActiveDownloads | Where-Object { ($_.Source -in 'Steam', 'Epic' -and $script:lastTrafficDown -ge 2) -or ($_.Done -ge 50MB -and $_.Modified -ge $recent) })
         if ($active.Count -gt 0) {
             [void](Send-SmartNotice 'download-suggest' "$($active[0].Source) indiriyor" "$($active[0].Name): İndirme modunu aç; bilgisayar uyumasın, bitince haber vereyim." 'modes' 360)
         }
@@ -895,9 +916,29 @@ function Invoke-NoticeChecks {
     }
 }
 
-# Only what needs action is announced; a remote access tool you use yourself is mentioned once a week.
+# The checks run in their own runspace (the antivirus query alone can take a few hundred ms),
+# so the window never waits for them.
 function Invoke-SecurityQuick {
-    $findings = @(Invoke-SecurityChecks -Quick)
+    if ($script:securityQuickJob) { return }
+    $shell = [powershell]::Create()
+    [void]$shell.AddScript("function Invoke-SecurityChecks {`r`n$(${function:Invoke-SecurityChecks})`r`n}`r`nInvoke-SecurityChecks -Quick")
+    $job = [pscustomobject]@{ Shell = $shell; Handle = $shell.BeginInvoke() }
+    $job | Add-Member -MemberType ScriptProperty -Name Done -Value { $this.Handle.IsCompleted }
+    $script:securityQuickJob = $job
+    Wait-UiJob $job {
+        param($Job)
+        $findings = @()
+        try { $findings = @($Job.Shell.EndInvoke($Job.Handle)) } catch { }
+        $Job.Shell.Dispose()
+        $script:securityQuickJob = $null
+        Complete-SecurityQuick $findings
+    }
+}
+
+# Only what needs action is announced; a remote access tool you use yourself is mentioned once a week.
+function Complete-SecurityQuick {
+    param($Findings)
+    $findings = @($Findings | Where-Object { $_ })
     $script:securityQuick = $findings
     foreach ($finding in $findings) {
         if ($finding.Severity -notin 'warning', 'critical') { continue }
@@ -933,6 +974,8 @@ function Set-ModesInterval {
 }
 
 $script:trafficSample = $null
+$script:lastTrafficDown = 0.0
+$script:securityQuickJob = $null
 $script:busyMinutes = 0
 $script:downloadAutoPausedUntil = [datetime]::MinValue
 
@@ -950,10 +993,14 @@ function Invoke-DownloadAutoStart {
         }
     }
     $script:trafficSample = [pscustomobject]@{ Received = $totals[0]; Sent = $totals[1]; At = $now }
+    $script:lastTrafficDown = $down
     if ($down -ge 30 -or $up -ge 8) { $script:busyMinutes++ } else { $script:busyMinutes = 0 }
     if ($script:download -or -not $script:options.DownloadAutoStart -or $now -lt $script:downloadAutoPausedUntil) { return }
+    # Not during a game: Steam pauses its download while you play but keeps the folder.
+    if ($script:boosted -or [GameBoostEngine]::IsForegroundFullscreen()) { return }
     $recent = (Get-Date).AddMinutes(-2)
-    $active = @(Get-ActiveDownloads | Where-Object { $_.Source -in 'Steam', 'Epic' -or ($_.Done -ge 50MB -and $_.Modified -ge $recent) })
+    # A Steam / Epic entry counts only while the line actually moves (a paused download keeps its folder).
+    $active = @(Get-ActiveDownloads | Where-Object { ($_.Source -in 'Steam', 'Epic' -and $down -ge 2) -or ($_.Done -ge 50MB -and $_.Modified -ge $recent) })
     $reason = if ($active.Count -gt 0) { Format-TrackedDownload $active[0] 0 }
         elseif ($script:busyMinutes -ge 2) { if ($up -ge 8 -and $down -lt 30) { "yükleme ↑ $(Format-Mbps $up)" } else { "indirme ↓ $(Format-Speed $down)" } }
         else { $null }
@@ -1031,7 +1078,8 @@ function Get-PowerChecks {
     $power = [Windows.Forms.SystemInformation]::PowerStatus
     if ($power.PowerLineStatus -eq [Windows.Forms.PowerLineStatus]::Offline) {
         $estimate = Get-BatteryEstimate
-        $detail = if ($estimate) { "Son $($estimate.Minutes) dk: ~$($estimate.Watts) W çekiş, bu hızla ~$(Format-Duration $estimate.Hours) kalır." } else { 'Çekiş ve kalan süre birkaç dakika içinde ölçülür.' }
+        $source = if ($estimate.Minutes -gt 0) { "Son $($estimate.Minutes) dk" } else { 'Windows' }
+        $detail = if ($estimate) { "${source}: ~$($estimate.Watts) W çekiş, bu hızla ~$(Format-Duration $estimate.Hours) kalır." } else { 'Çekiş ve kalan süre birkaç dakika içinde ölçülür.' }
         $alerts.Add((New-Alert 'info' "Pilde: %$([math]::Round($power.BatteryLifePercent * 100))" $detail))
     } else { $alerts.Add((New-Alert 'ok' 'Prizde' 'Tasarruf ayarları pildeyken daha çok fark eder.')) }
     $light = Get-Brightness

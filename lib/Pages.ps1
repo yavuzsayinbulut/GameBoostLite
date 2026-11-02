@@ -514,7 +514,7 @@ function Update-ModesLive {
     if ($power.PowerLineStatus -eq [Windows.Forms.PowerLineStatus]::Offline) {
         $estimate = Get-BatteryEstimate
         $percent = [math]::Round($power.BatteryLifePercent * 100)
-        $script:saverBattery.Text = if ($estimate) { "Pil %$percent · ~$($estimate.Watts) W çekiş · bu hızla ~$(Format-Duration $estimate.Hours) (son $($estimate.Minutes) dk)" }
+        $script:saverBattery.Text = if ($estimate) { "Pil %$percent · ~$($estimate.Watts) W çekiş · bu hızla ~$(Format-Duration $estimate.Hours) ($(if ($estimate.Minutes -gt 0) { "son $($estimate.Minutes) dk" } else { 'Windows' }))" }
             else { "Pil %$percent · çekiş birkaç dakikada ölçülür" }
     } else { $script:saverBattery.Text = 'Prizde · tasarruf ayarları pilde daha çok fark eder' }
 }
