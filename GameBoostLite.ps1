@@ -39,6 +39,7 @@ if (-not $ownsInstance) {
 . (Join-Path $script:appRoot 'lib\Tweaks.ps1')
 . (Join-Path $script:appRoot 'lib\Score.ps1')
 . (Join-Path $script:appRoot 'lib\Modes.ps1')
+. (Join-Path $script:appRoot 'lib\Health.ps1')
 
 $script:hasNvidiaGpu = [bool](Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue)
 [void][GameBoostEngine]::CpuPercent()

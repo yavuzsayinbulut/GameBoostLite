@@ -1725,6 +1725,21 @@ public static class GameBoostSystemState {
     }
     [DllImport("powrprof.dll")] static extern uint CallNtPowerInformation(int level, IntPtr input, int inputLength, out BatteryState output, int outputLength);
 
+    [StructLayout(LayoutKind.Sequential)] struct LastInput { public uint Size; public uint Time; }
+    [DllImport("user32.dll")] static extern bool GetLastInputInfo(ref LastInput info);
+    [DllImport("powrprof.dll")] static extern bool SetSuspendState(bool hibernate, bool force, bool disableWakeEvents);
+
+    // Seconds since the last keyboard or mouse input in this session.
+    public static double IdleSeconds() {
+        var info = new LastInput();
+        info.Size = (uint)Marshal.SizeOf(typeof(LastInput));
+        if (!GetLastInputInfo(ref info)) return 0;
+        return unchecked((uint)Environment.TickCount - info.Time) / 1000.0;
+    }
+
+    // Sleep (not hibernate), letting apps veto it.
+    public static bool Sleep() { return SetSuspendState(false, false, false); }
+
     // { remaining mWh, full mWh, rate mW (negative while draining, 0 when Windows does not know) },
     // or null without a battery. Microseconds, unlike the WMI battery classes.
     public static double[] Battery() {

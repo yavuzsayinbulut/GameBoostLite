@@ -39,6 +39,7 @@ $script:options = [ordered]@{
     SmartNotices    = $true
     DownloadAutoStop = $true
     DownloadAutoStart = $false
+    DownloadSleepAfter = $false
     SaverEfficiency = $true
     SaverRefresh    = $true
     SaverBrightness = $true
@@ -469,6 +470,8 @@ function Register-DetectedGame {
         Add-Log 'Oyun önceliği değiştirilemedi (anti-cheat koruması olabilir).'
     }
     if ($Path -and -not (Set-GameGpuPreference $Path)) { Add-Log 'Yüksek performanslı GPU tercihi kaydedilemedi.' }
+    # Remembered so a hitch fix (Defender exclusion) can point at the game's own folder.
+    Save-GamePath $Name $(if ($Path) { $Path } else { [GameBoostEngine]::ProcessPath($Id) })
     [void](Restore-EfficiencyTargets $Name)
     Set-CurrentGameFile $Id $Name
     Add-SessionGame $Id $Name

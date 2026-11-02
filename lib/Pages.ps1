@@ -153,6 +153,7 @@ function Update-TrayState {
     $script:trayBoostItem.Enabled = -not $script:boosted
     $script:trayNormalItem.Enabled = $script:boosted
     $script:trayDownloadItem.Text = if ($script:download) { 'İndirme modunu kapat' } else { 'İndirme modunu aç' }
+    $script:traySleepCancelItem.Visible = [bool]$script:sleepCountdown
     $script:traySaverItem.Text = if ($script:saver) { 'Tasarruf modunu kapat' } else { 'Tasarruf modunu aç' }
     $script:traySaverItem.Enabled = -not $script:boosted
 }
@@ -171,6 +172,8 @@ function New-TrayIcon {
     [void]$menu.Items.Add('-')
     $script:trayDownloadItem = $menu.Items.Add('İndirme modunu aç')
     $script:traySaverItem = $menu.Items.Add('Tasarruf modunu aç')
+    $script:traySleepCancelItem = $menu.Items.Add('Uykuyu iptal et')
+    $script:traySleepCancelItem.Visible = $false
     [void]$menu.Items.Add('-')
     $restart = $menu.Items.Add('Yeniden başlat')
     $quit = $menu.Items.Add('Çıkış')
@@ -180,6 +183,7 @@ function New-TrayIcon {
     $script:trayNormalItem.Add_Click({ Restore-NormalMode 'Normal moda dönüldü.' -Manual })
     $script:trayDownloadItem.Add_Click({ if ($script:download) { Stop-DownloadMode -Manual } else { Start-DownloadMode } })
     $script:traySaverItem.Add_Click({ if ($script:saver) { Stop-SaverMode } else { [void](Start-SaverMode 'normal') } })
+    $script:traySleepCancelItem.Add_Click({ Stop-SleepCountdown 'Uyku iptal edildi.' })
     $restart.Add_Click({ Exit-GameBoost -Restart })
     $quit.Add_Click({ Exit-GameBoost })
 
@@ -190,7 +194,8 @@ function New-TrayIcon {
     # A clicked notification opens the page it is about.
     $icon.Add_BalloonTipClicked({
         Show-FromTray
-        if ($script:noticeTarget -eq 'security') { Show-Page 'care'; Select-UiTab $script:careTabs 1 }
+        $tabs = @{ security = 1; weekly = 2; fixes = 3 }
+        if ($tabs.ContainsKey([string]$script:noticeTarget)) { Show-Page 'care'; Select-UiTab $script:careTabs $tabs[[string]$script:noticeTarget] }
         elseif ($script:noticeTarget) { Show-Page $script:noticeTarget }
     })
     $script:trayIcon = $icon
@@ -318,18 +323,22 @@ function Build-ModesPage {
         -Tip 'Yönetici izni ister; Wi-Fi birkaç saniye kopar. Steam kaldığı yerden sürer, tarayıcı indirmeleri yarıda kalabilir.'
     $script:downloadFixButton.Visible = $false
     $script:downloadVerdictDetail = New-UiLabel $download '' 18 118 404 34 -Font $script:fonts.Small -Color $script:theme.SubText -Wrap
-    $script:downloadItems = New-UiLabel $download '' 18 156 404 32 -Font $script:fonts.Small -Wrap
-    [void](New-OptionToggle $download 'DownloadAutoStart' 'İndirme / yükleme başlayınca otomatik aç' 18 188 404 `
-        'Steam / Epic indirmesi, 50 MB üstü tarayıcı indirmesi veya 2 dk yoğun trafik (↓ 30+ / ↑ 8+ Mbps) görülünce mod açılır ve bildirim gelir. Elle kapatırsan 30 dk tekrar açılmaz.')
-    [void](New-OptionToggle $download 'DownloadAutoStop' 'Bitince modu kapat, uykuya izin ver' 18 218 404 `
+    $script:sleepCancelButton = New-UiButton $download 'Uykuyu iptal et' 262 90 160 28 $script:theme.Accent { Stop-SleepCountdown 'Uyku iptal edildi.' }
+    $script:sleepCancelButton.Visible = $false
+    $script:downloadItems = New-UiLabel $download '' 18 156 404 30 -Font $script:fonts.Small -Wrap
+    [void](New-OptionToggle $download 'DownloadAutoStart' 'İndirme / yükleme başlayınca otomatik aç' 18 186 404 `
+        'Steam / Epic indirmesi, 50 MB üstü tarayıcı indirmesi veya 2 dk yoğun trafik (↓ 30+ / ↑ 8+ Mbps) görülünce mod açılır ve bildirim gelir. Oyun sırasında açılmaz. Elle kapatırsan 30 dk tekrar açılmaz.')
+    [void](New-OptionToggle $download 'DownloadAutoStop' 'Bitince modu kapat, uykuya izin ver' 18 214 404 `
         'Steam / Epic / tarayıcı indirmeleri bitince (görünmüyorsa trafik 2 dk durgun kalınca) mod kapanır ve bilgisayar normal zamanında uyur.')
-    $script:downloadButton = New-UiButton $download 'İndirme modunu aç' 18 254 200 34 $script:theme.Accent {
+    [void](New-OptionToggle $download 'DownloadSleepAfter' 'Bitince bilgisayarı uyut (60 sn iptal süresi)' 18 242 404 `
+        'İndirme bitince 60 sn geri sayım başlar; fareyi oynatırsan, bir tuşa basarsan, oyun açılırsa veya yeni indirme başlarsa iptal olur. Tepsiden de iptal edilir.')
+    $script:downloadButton = New-UiButton $download 'İndirme modunu aç' 18 278 200 32 $script:theme.Accent {
         if ($script:download) { Stop-DownloadMode -Manual } else { Start-DownloadMode }
         Update-ModesPage
     } -Tip 'Bilgisayar uyumaz (ekran kapanabilir), Wi-Fi güç tasarrufu kapanır, Wi-Fi koparsa aynı ağa yeniden bağlanır; Steam, Epic ve tarayıcı indirmelerini izler.'
-    [void](New-UiButton $download 'Hız testi' 226 254 196 34 -OnClick { Show-Page 'network'; Start-SpeedTest } `
+    [void](New-UiButton $download 'Hız testi' 226 278 196 32 -OnClick { Show-Page 'network'; Start-SpeedTest } `
         -Tip 'Ağ / Wi-Fi sayfasında indirme ve yükleme hızını ölçer; İndirme modu darboğazı bu sonuca göre belirler.')
-    $script:downloadChecks = New-UiAlertView $download 16 296 410 66
+    $script:downloadChecks = New-UiAlertView $download 16 316 410 46
 
     $saver = New-UiCard $page 'Tasarruf modu' 484 88 452 370
     $script:saverStatus = New-UiLabel $saver '' 18 44 416 22 -Font $script:fonts.BodyBold
@@ -460,6 +469,7 @@ function Update-ModesLive {
     if (-not $script:downloadStatus) { return }
     $now = Get-ModesNow
     $mode = $script:download
+    $script:sleepCancelButton.Visible = [bool]$script:sleepCountdown
     if ($mode) {
         $plan = $script:lastSpeedResult
         $planText = if ($script:planTest) { 'paket hızı ölçülüyor...' } elseif ($plan) { 'paket ↓ {0} / ↑ {1}' -f (Format-Mbps $plan.Down), (Format-Mbps $plan.Up) } else { 'bilgisayar uyumuyor' }
@@ -488,6 +498,11 @@ function Update-ModesLive {
     } else {
         $script:downloadStatus.Text = 'Kapalı'
         $script:downloadStatus.ForeColor = $script:theme.SubText
+        if ($script:sleepCountdown) {
+            $left = [math]::Max(0, [math]::Ceiling($script:sleepCountdown.Seconds - ((Get-ModesNow) - $script:sleepCountdown.Started).TotalSeconds))
+            $script:downloadStatus.Text = "Uyku: $left sn sonra · fare / klavye iptal eder"
+            $script:downloadStatus.ForeColor = $script:theme.Amber
+        }
         $script:downloadLive.Text = if ($script:lastSpeedResult) {
             'Son hız testi: ↓ {0} · ↑ {1} · {2:dd.MM HH:mm}' -f (Format-Speed $script:lastSpeedResult.Down), (Format-Mbps $script:lastSpeedResult.Up), $script:lastSpeedResult.At
         } else { 'Hız testi yapılmadı; darboğaz kararı için bir kez ölç.' }
@@ -1613,10 +1628,28 @@ function Set-ScoreNumber {
 # ---------------------------------------------------------------- Akıllı Bakım
 
 function Build-CarePage {
-    $page = New-Page 'care' 'Bakım ve Güvenlik' 'Tüm uyarılar, güvenlik analizi, güvenli temizlik ve depolama analizi.' 0xE90F { param($Page) Update-HomeAlerts }
+    $page = New-Page 'care' 'Bakım ve Güvenlik' 'Uyarılar, güvenlik, haftalık özet, tek tıklık çözümler, güvenli temizlik.' 0xE90F { param($Page) Update-HomeAlerts; Update-CareTab }
     $left = New-UiCard $page '' 28 88 440 608
-    $script:careTabs = New-UiTabs $left 16 14 @('Akıllı uyarılar', 'Güvenlik') @(150, 130) ([Drawing.Rectangle]::new(2, 52, 436, 552))
+    $script:careTabs = New-UiTabs $left 14 14 @('Uyarılar', 'Güvenlik', 'Haftalık', 'Çözümler') @(98, 98, 98, 98) ([Drawing.Rectangle]::new(2, 52, 436, 552))
+    $script:careTabs.Changed = { param($Index) Update-CareTab }
     $script:maintenanceAlerts = New-UiAlertView $script:careTabs.Panels[0] 14 0 410 540
+
+    $weekly = $script:careTabs.Panels[2]
+    $script:weeklyBox = New-UiTextBox $weekly 14 0 410 500
+    $script:weeklyBox.BackColor = $script:theme.Card
+    [void](New-UiButton $weekly 'Özeti yenile' 14 508 140 30 -OnClick { Update-WeeklyPage })
+    [void](New-UiLabel $weekly 'Her hafta sessiz bir bildirimle de gelir.' 164 514 260 20 -Font $script:fonts.Small -Color $script:theme.Muted)
+
+    $fixes = $script:careTabs.Panels[3]
+    [void](New-UiLabel $fixes 'Takılma nedenleri, pil, sürücü ve ısı için tek tıklık çözümler. Hiçbiri sen tıklamadan yapılmaz.' 14 0 410 36 `
+        -Font $script:fonts.Small -Color $script:theme.SubText -Wrap)
+    $script:fixesPanel = [Windows.Forms.Panel]::new()
+    $script:fixesPanel.Location = [Drawing.Point]::new(14, 40)
+    $script:fixesPanel.Size = [Drawing.Size]::new(414, 506)
+    $script:fixesPanel.AutoScroll = $true
+    $script:fixesPanel.BackColor = $script:theme.Card
+    Set-UiDarkScrollbars $script:fixesPanel
+    $fixes.Controls.Add($script:fixesPanel)
     $security = $script:careTabs.Panels[1]
     $script:securitySummary = New-UiLabel $security 'Henüz taranmadı' 14 0 410 22 -Font $script:fonts.BodyBold -Color $script:theme.SubText
     [void](New-UiLabel $security 'İzlenme (uzaktan erişim, kamera / mikrofon, proxy), madencilik ve virüs şüphesi. Hiçbir şeyi kapatmaz; her bulgu için ne yapılacağını söyler.' `
@@ -1653,6 +1686,48 @@ Depolamayı analiz et: büyük klasörleri ve
 
 $script:auditAlerts = @()
 $script:securityAlerts = @()
+
+# Only the tab on screen is read.
+function Update-CareTab {
+    if (-not $script:careTabs) { return }
+    switch ($script:careTabs.Index) { 2 { Update-WeeklyPage } 3 { Update-FixesPage } }
+}
+
+function Update-WeeklyPage {
+    if (-not $script:weeklyBox) { return }
+    $script:weeklyBox.Text = (Get-WeeklySummary).Lines -join "`r`n"
+}
+
+# One row per fix: title, what and why, and the button that does it.
+function Update-FixesPage {
+    if (-not $script:fixesPanel) { return }
+    $items = @(Get-FixItems)
+    $script:fixesPanel.SuspendLayout()
+    foreach ($control in @($script:fixesPanel.Controls)) { $control.Dispose() }
+    $script:fixesPanel.Controls.Clear()
+    if ($items.Count -eq 0) {
+        [void](New-UiLabel $script:fixesPanel 'Şu an önerilecek bir çözüm yok. Oyun oynadıkça takılma nedenleri, pil ve sürücü burada değerlendirilir.' 0 4 390 40 -Wrap -Color $script:theme.SubText)
+    }
+    $top = 0
+    foreach ($item in $items) {
+        $hasButton = [bool]$item.Button
+        [void](New-UiLabel $script:fixesPanel $item.Title 0 $top $(if ($hasButton) { 268 } else { 390 }) 22 -Font $script:fonts.BodyBold)
+        if ($hasButton) {
+            $button = New-UiButton $script:fixesPanel $item.Button 274 $top 116 28 $script:theme.Accent {
+                $fix = $this.Tag
+                & $fix.Action $fix.Argument
+            }
+            $button.Tag = $item
+        }
+        # As tall as the text needs, so nothing is cut off.
+        $height = [Windows.Forms.TextRenderer]::MeasureText($item.Detail, $script:fonts.Small, [Drawing.Size]::new(390, 0),
+            [Windows.Forms.TextFormatFlags]::WordBreak).Height + 4
+        $detail = New-UiLabel $script:fixesPanel $item.Detail 0 ($top + 30) 390 $height -Font $script:fonts.Small -Color $script:theme.SubText -Wrap
+        $script:toolTip.SetToolTip($detail, $item.Detail)
+        $top += 30 + $height + 14
+    }
+    $script:fixesPanel.ResumeLayout()
+}
 
 # Background audit (10 s of CPU / GPU use) and the security checks, in their own runspace so the
 # window (and a running BOOST) never waits for them.

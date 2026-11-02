@@ -46,8 +46,8 @@ Sistem Bilgisi   Tam donanım raporu ve "Kullanabileceğin özellikler".
                  bu sırada pencere kullanılabilir.
 PC Puanı         Oyun gücü puanı, parça puanları, kurulum puanı, oyuna göre
                  tahmin, yükseltme etkisi.
-Bakım ve         Akıllı uyarılar ve Güvenlik sekmeleri, depolama analizi,
-Güvenlik         güvenli temizlik.
+Bakım ve         Uyarılar, Güvenlik, Haftalık özet ve Çözümler sekmeleri,
+Güvenlik         depolama analizi, güvenli temizlik.
 FPS / HUD        Oyun içi gösterge (F10 / Ctrl+F10).
 
 OTOMATİK (Oyun Modu > Otomatik; üçü de başlangıçta kapalı)
@@ -229,6 +229,29 @@ GÜVENLİK (Bakım ve Güvenlik > Güvenlik)
   başlangıç görevleri, tuhaf klasörden çalışan imzasız uygulamalar.
 Her bulgu ne yapılacağını söyler. 10 dakikada bir hafif kontrol (~50 ms) önemli
 bulgular için bildirim gönderir. Hiçbir şeyi kapatmaz, silmez veya değiştirmez.
+
+HAFTALIK ÖZET, PİL, SÜRÜCÜ VE ÇÖZÜMLER (Bakım ve Güvenlik)
+---------------------------------------------------------
+Günde bir hafif okuma (disk boş alanı, pilin tam kapasitesi, ekran kartı sürücü
+tarihi) ve şarjda %100'de geçen dakikaların sayımı (health-history.json, 60 gün).
+- Haftalık: oyun süresi, ekran kartı sıcaklığı ve geçen haftaya göre farkı
+  (+5°C ve üstü → fan / hava girişi temizliği), ısı yavaşlaması, takılmalar ve en
+  sık nedeni, pil sağlığı (tasarım kapasitesine göre, aylık değişim), %100'de
+  prizde geçen günler, disk, sürücü yaşı, güvenlik. Haftada bir sessiz bildirim.
+- Çözümler (her biri yalnızca tıklayınca):
+  - Takılma nedeni Defender → oyunun kendi klasörünü taramadan hariç tut
+    (yalnızca Steam / Epic / Xbox / EA / Ubisoft / Rockstar kütüphanesindeki
+    klasörler; İndirilenler, Temp gibi klasörler asla önerilmez). Yönetici izni
+    ister, ne eklendiği kaydedilir ve aynı listeden "Geri al" ile kaldırılır.
+  - Windows Update → Etkin saatler; RAM → Kapatma listesi; indirme → Steam
+    indirmeleri; ısı → OMEN Gaming Hub; Wi-Fi → Ağ / Wi-Fi; arka planda yoran
+    uygulama → BOOST kapatma listesine ekle (korunan uygulamalar eklenmez).
+  - Sürücü 120 günden eskiyse → NVIDIA App (yoksa sürücü sayfası).
+  - Pil bir haftada 3+ gün 8 saatten uzun %100'de prizde → HP pil koruması
+    (BIOS > Adaptive Battery Optimizer veya OMEN Gaming Hub).
+- İndirme modu: "Bitince bilgisayarı uyut" (başlangıçta kapalı). İndirme bitince
+  60 sn geri sayım ve bildirim; fare / klavye kullanılırsa, oyun / tam ekran
+  açılırsa veya yeni indirme başlarsa iptal. Tepsiden "Uykuyu iptal et".
 
 OYUNA HAZIRLIK VE OYUN GEÇMİŞİ
 ------------------------------

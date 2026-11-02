@@ -265,11 +265,7 @@ function Update-DownloadMode {
         $mode.Notified = $true
         $text = "Tamamlandı: $($mode.Completed -join ', ')."
         $mode.Completed.Clear()
-        if ($script:options.DownloadAutoStop) {
-            Stop-DownloadMode 'İndirmeler tamamlandı; İndirme modu kapandı, bilgisayar yeniden uyuyabilir.'
-            $text += ' İndirme modu kapandı.'
-        }
-        [void](Send-SmartNotice 'download-done' 'İndirme tamamlandı' $text 'modes' 1 -Important)
+        Complete-DownloadMode $text 'İndirmeler tamamlandı'
         return
     }
     # Traffic that ran for a while and then stopped: finished, paused or stuck.
@@ -283,12 +279,61 @@ function Update-DownloadMode {
             return
         }
         $text = 'Trafik 2 dakikadır durgun: indirme bitti, duraklatıldı veya takıldı ({0} indirildi).' -f (Format-ByteSize $mode.Received)
-        if ($script:options.DownloadAutoStop) {
-            Stop-DownloadMode 'Trafik durdu; İndirme modu kendiliğinden kapandı, bilgisayar yeniden uyuyabilir.'
-            $text += ' İndirme modu kapandı.'
-        }
-        [void](Send-SmartNotice 'download-quiet' 'İndirme durdu' $text 'modes' 1 -Important)
+        Complete-DownloadMode $text 'Trafik durdu' 'download-quiet' 'İndirme durdu'
     }
+}
+
+# The download is over: tell, switch the mode off when asked, and with "Bitince uyut" count down to sleep.
+function Complete-DownloadMode {
+    param([string]$Text, [string]$Reason, [string]$Key = 'download-done', [string]$Title = 'İndirme tamamlandı')
+    $sleep = [bool]$script:options.DownloadSleepAfter
+    if ($script:options.DownloadAutoStop -or $sleep) {
+        Stop-DownloadMode "$Reason; İndirme modu kapandı, bilgisayar yeniden uyuyabilir."
+        $Text += ' İndirme modu kapandı.'
+    }
+    if ($sleep) { Start-SleepCountdown $Text }
+    else { [void](Send-SmartNotice $Key $Title $Text 'modes' 1 -Important) }
+}
+
+# ---------------------------------------------------------------- sleep after the download
+
+$script:sleepCountdown = $null
+function Get-IdleSeconds { return [GameBoostSystemState]::IdleSeconds() }
+function Invoke-SystemSleep { return [GameBoostSystemState]::Sleep() }
+
+# 60 s to change your mind: any keyboard or mouse input, a game or a new download cancels it.
+function Start-SleepCountdown {
+    param([string]$What)
+    if ($script:sleepCountdown) { return }
+    $script:sleepCountdown = [pscustomobject]@{ Started = Get-ModesNow; Seconds = 60 }
+    Add-Log 'İndirme bitti; 60 sn sonra uyku moduna geçilecek (fare / klavye kullanılırsa iptal).'
+    [void](Send-SmartNotice 'sleep-countdown' 'Bilgisayar 60 sn sonra uyuyacak' "$What Fareyi oynatırsan veya bir tuşa basarsan iptal olur." 'modes' 1 -Important)
+    Update-ModesUi
+}
+
+function Stop-SleepCountdown {
+    param([string]$Reason = 'Uyku iptal edildi.')
+    if (-not $script:sleepCountdown) { return }
+    $script:sleepCountdown = $null
+    Add-Log $Reason
+    Update-ModesUi
+}
+
+function Update-SleepCountdown {
+    $countdown = $script:sleepCountdown
+    if (-not $countdown) { return }
+    $elapsed = ((Get-ModesNow) - $countdown.Started).TotalSeconds
+    # Idle time shorter than the countdown means someone touched the PC after it began.
+    if ((Get-IdleSeconds) + 2 -lt $elapsed) { Stop-SleepCountdown 'Fare / klavye kullanıldı; uyku iptal edildi.'; return }
+    if ($script:boosted -or $script:download -or [GameBoostEngine]::IsForegroundFullscreen()) {
+        Stop-SleepCountdown 'Bilgisayar kullanımda (oyun, tam ekran veya yeni indirme); uyku iptal edildi.'
+        return
+    }
+    if ($elapsed -lt $countdown.Seconds) { return }
+    $script:sleepCountdown = $null
+    Add-Log 'İndirme bittiği için bilgisayar uyku moduna alınıyor.'
+    Update-ModesUi
+    [void](Invoke-SystemSleep)
 }
 
 # ---------------------------------------------------------------- what is downloading
@@ -959,6 +1004,7 @@ function Invoke-ModesTick {
     $script:modesTick++
     if ($script:download) { Update-DownloadMode }
     if ($script:saver) { Watch-SaverForeground }
+    if ($script:sleepCountdown) { Update-SleepCountdown }
     $now = [datetime]::UtcNow
     if (($now - $script:lastMinuteAt).TotalSeconds -ge 60) { $script:lastMinuteAt = $now; Invoke-ModesMinute }
     $visible = Test-ModesVisible
@@ -969,7 +1015,7 @@ function Invoke-ModesTick {
 function Set-ModesInterval {
     param([bool]$Visible)
     if (-not $script:modesTimer) { return }
-    $interval = if ($Visible -and $script:download) { 1000 } elseif ($Visible) { 2000 } else { 5000 }
+    $interval = if (($Visible -and $script:download) -or $script:sleepCountdown) { 1000 } elseif ($Visible) { 2000 } else { 5000 }
     if ($script:modesTimer.Interval -ne $interval) { $script:modesTimer.Interval = $interval }
 }
 
@@ -1014,6 +1060,7 @@ function Invoke-DownloadAutoStart {
 function Invoke-ModesMinute {
     $script:minuteCount++
     Update-BatteryMeter
+    Update-HealthMinute
     Invoke-DownloadAutoStart
     if ($script:boosted -or -not ($script:saver -or $script:options.SmartNotices)) { return }
     $sample = Get-ActivitySample
