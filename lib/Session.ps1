@@ -1,12 +1,15 @@
 ﻿# Game session watch. Runs only while BOOST is on and stops with it:
 # GPU heat/limits (one nvidia-smi process, every 5 s), which GPU the game draws with (one check),
 # charger strength, router ping, background download volume and Windows Update / Defender activity.
+# With PresentMon (as for the HUD) also the game's frame times: hitches are matched with what was
+# going on at the time (see Get-HitchAnalysis).
 # Everything is reported silently inside the app; nothing is closed or changed.
 
 $script:session = $null
 $script:sessionAlerts = @()
 $script:gpuTelemetry = $null
 $script:pingMonitor = $null
+$script:frameWatch = $null
 $script:updateProcessNames = New-NameSet @('TiWorker', 'TrustedInstaller', 'MoUsoCoreWorker', 'wuauclt', 'UsoClient', 'WaaSMedicAgent', 'SIHClient')
 $script:defenderProcessNames = New-NameSet @('MsMpEng', 'MpDefenderCoreService', 'MsMpEngCP')
 foreach ($name in @($script:updateProcessNames) + @($script:defenderProcessNames)) { [void][GameBoostEngine]::SystemWatchNames.Add($name) }
@@ -74,11 +77,34 @@ function Start-PlacementCheck {
     return $check
 }
 
+# Frame times need NVIDIA FrameView's PresentMon and the same Windows right as the HUD's FPS.
+function New-FrameWatch {
+    param($Session)
+    if (-not (Test-Path -LiteralPath $script:presentMonPath)) { $Session.FrameNote = 'ölçülmedi (NVIDIA FrameView / PresentMon bulunamadı)'; return $null }
+    if (-not (Test-PresentMonRights)) { $Session.FrameNote = 'ölçülmedi (FPS yetkisi yok; FPS / HUD sayfasındaki komutu bir kez çalıştır)'; return $null }
+    return [GameBoostFrameWatch]::new()
+}
+
+# Something that can make a game stutter, over a stretch of time. Stretches of one kind that touch merge.
+function Add-SessionEvent {
+    param($Session, [string]$Kind, [datetime]$From, [datetime]$To)
+    if (-not $Session -or $To -le $From) { return }
+    $last = $Session.LastEvents[$Kind]
+    if ($last -and $From -le $last.To.AddSeconds(1)) {
+        if ($To -gt $last.To) { $last.To = $To }
+        return
+    }
+    $stretch = [pscustomobject]@{ Kind = $Kind; From = $From; To = $To }
+    $Session.Events.Add($stretch)
+    $Session.LastEvents[$Kind] = $stretch
+}
+
 # ---------------------------------------------------------------- session lifetime
 
 function Start-GameSession {
     Stop-SessionMonitors
     $script:pingMonitor = $null
+    $script:frameWatch = $null
     $now = Get-SessionNow
     $script:sessionAlerts = @()
     $script:session = [pscustomobject]@{
@@ -90,14 +116,17 @@ function Start-GameSession {
         AcPercent = $null; AcSince = $null; ChargerDrop = $null; ChargerAlerted = $false; PlayedOnBattery = $false
         NetBytes = (Get-NetworkReceivedBytes); NetAt = $now; NetHeavySeconds = 0.0; NetHeavyBits = 0.0; NetMaxMbps = 0.0
         SysCpuAt = $null; SysCpuUpdate = 0.0; SysCpuDefender = 0.0; UpdateSeconds = 0.0; DefenderSeconds = 0.0
+        Events = [Collections.Generic.List[object]]::new(); LastEvents = @{}; TickAt = $now; ActivityAt = $now; FrameNote = $null
     }
     $script:gpuTelemetry = New-GpuTelemetryReader
     $script:pingMonitor = New-PingMonitor
+    $script:frameWatch = New-FrameWatch $script:session
 }
 
 function Stop-SessionMonitors {
     if ($script:gpuTelemetry) { $script:gpuTelemetry.Stop(); $script:gpuTelemetry = $null }
     if ($script:pingMonitor) { $script:pingMonitor.Stop() }
+    if ($script:frameWatch) { $script:frameWatch.Stop() }
 }
 
 function Add-SessionGame {
@@ -123,6 +152,10 @@ function Update-GameSession {
     $now = Get-SessionNow
     $free = [GameBoostEngine]::MemoryGb()[0]
     if ($free -gt 0 -and $free -lt $s.MinFreeRamGb) { $s.MinFreeRamGb = $free }
+    # Under 1 GB available Windows starts reading pages back from disk, which shows up as hitches.
+    if ($free -gt 0 -and $free -lt 1.0) { Add-SessionEvent $s 'ram' $s.TickAt $now }
+    $s.TickAt = $now
+    if ($script:frameWatch -and $s.GamePid -gt 0) { $script:frameWatch.Follow($script:presentMonPath, $s.GamePid) }
     if ($null -ne $Snapshot -and $script:detectedGames.Count -gt 0) {
         # The game's own processes only; launchers and helpers are not added in.
         foreach ($process in $Snapshot) {
@@ -156,6 +189,7 @@ function Update-SessionGpu {
     if ($util -ge 50) { $s.BusySamples++; if ($powerCap) { $s.PowerCapBusySamples++ } }
     if ($thermal) { $s.ThermalSamples++ }
     if ($slowdown) { $s.SlowdownSamples++ }
+    if ($thermal -or $slowdown) { $now = Get-SessionNow; Add-SessionEvent $s 'gpu' $now.AddSeconds(-5) $now }
     # Heat or hardware slowdown is reported once, and only when it lasts two readings (~10 s).
     if ($thermal -or $slowdown) { $s.LimitStreak++ } else { $s.LimitStreak = 0 }
     if ($s.LimitStreak -ge 2 -and -not $s.LimitAlerted) {
@@ -196,7 +230,7 @@ function Update-SessionNetwork {
         $mbps = $bits / 1e6 / $seconds
         if ($mbps -gt $s.NetMaxMbps) { $s.NetMaxMbps = $mbps }
         # 16 Mbps and up is far beyond what online games use; something is downloading.
-        if ($mbps -ge 16) { $s.NetHeavySeconds += $seconds; $s.NetHeavyBits += $bits }
+        if ($mbps -ge 16) { $s.NetHeavySeconds += $seconds; $s.NetHeavyBits += $bits; Add-SessionEvent $s 'download' $s.NetAt $Now }
     }
     $s.NetBytes = $bytes
     $s.NetAt = $Now
@@ -253,12 +287,100 @@ function Update-SessionSystemWork {
     if ($s.SysCpuAt) {
         $elapsed = ($now - $s.SysCpuAt).TotalSeconds
         # Busy = at least half a core on average over the interval.
-        if ($elapsed -gt 0 -and ($update - $s.SysCpuUpdate) / $elapsed -ge 0.5) { $s.UpdateSeconds += $elapsed }
-        if ($elapsed -gt 0 -and ($defender - $s.SysCpuDefender) / $elapsed -ge 0.5) { $s.DefenderSeconds += $elapsed }
+        if ($elapsed -gt 0 -and ($update - $s.SysCpuUpdate) / $elapsed -ge 0.5) { $s.UpdateSeconds += $elapsed; Add-SessionEvent $s 'update' $s.SysCpuAt $now }
+        if ($elapsed -gt 0 -and ($defender - $s.SysCpuDefender) / $elapsed -ge 0.5) { $s.DefenderSeconds += $elapsed; Add-SessionEvent $s 'defender' $s.SysCpuAt $now }
     }
     $s.SysCpuAt = $now
     $s.SysCpuUpdate = $update
     $s.SysCpuDefender = $defender
+}
+
+# Background apps that used the CPU since the previous activity sample (BOOST, every 12 s).
+# Windows Update and Defender have their own kinds above.
+function Add-SessionBusyApps {
+    param($Busy)
+    $s = $script:session
+    if (-not $s) { return }
+    $now = Get-SessionNow
+    foreach ($process in $Busy) {
+        if ($process.CpuPercent -lt 8 -or $process.Id -eq $PID -or $script:detectedGames.ContainsKey($process.Id) -or
+            $script:detectedGames.ContainsKey($process.ParentId)) { continue }
+        if ($script:updateProcessNames.Contains($process.Name) -or $script:defenderProcessNames.Contains($process.Name)) { continue }
+        Add-SessionEvent $s "cpu:$($process.Name)" $s.ActivityAt $now
+    }
+    $s.ActivityAt = $now
+}
+
+# ---------------------------------------------------------------- hitch analysis
+
+# Name and advice per kind of event; cpu:<name> is a background app.
+$script:hitchCauseInfo = @{
+    defender = @('Defender taraması', 'Defender kapatılmamalı; taramalar genelde bilgisayar boştayken yapılır, oyundan önce birkaç dakika boşta bırakmak yardımcı olur.')
+    update   = @('Windows Update', 'Güncellemeleri oyun dışında bitir; Ayarlar > Windows Update > Etkin saatler.')
+    ram      = @('RAM dolması', 'Oyundan önce tarayıcıyı ve büyük uygulamaları kapat veya BOOST kapatma listesine ekle.')
+    download = @('arka plan indirme', 'Steam ve diğer indirmeleri oyun sırasında duraklat.')
+    gpu      = @('ekran kartı ısı yavaşlaması', 'Laptopu yükselt, hava girişlerini açık tut; fan / performans modunu kontrol et.')
+    wifi     = @('Wi-Fi gecikme sıçraması', 'Wi-Fi sürücüsü arka planda ağ tararken oyunu da duraksatabilir; Ağ / Wi-Fi önerilerini uygula veya kablo kullan.')
+}
+
+function Get-HitchCauseInfo {
+    param([string]$Kind)
+    if ($Kind -like 'cpu:*') {
+        $name = $Kind.Substring(4)
+        return @("$name (arka planda işlemci)", "Oyun sırasında $name uygulamasını kapat veya BOOST kapatma listesine ekle.")
+    }
+    return $script:hitchCauseInfo[$Kind]
+}
+
+# Hitches against what was going on at the time. A cause is named only when hitches came clearly
+# more often while it ran (at least twice the rate of the rest of the game), never for a coincidence:
+# Defender running for most of the game would otherwise "explain" most hitches.
+function Get-HitchAnalysis {
+    param($Watch, $Events)
+    $stats = $Watch.Stats()
+    if ($stats[0] -lt 1000 -or $stats[3] -lt 60) { return $null }
+    $seconds = $stats[3]
+    $start = $Watch.FirstFrameUtc
+    $end = $start.AddSeconds($seconds)
+    $hitches = @($Watch.Hitches())
+    $total = $hitches.Count
+    $result = [pscustomobject]@{
+        Fps = [math]::Round(1000 / $stats[1]); LowFps = [math]::Round(1000 / $stats[2])
+        Hitches = $total; PerMinute = $total / ($seconds / 60); WorstMs = 0; Causes = @(); Unexplained = $total
+    }
+    if ($total -gt 0) { $result.WorstMs = [math]::Round(($hitches | Measure-Object FrameMs -Maximum).Maximum) }
+    if ($total -lt 3) { return $result }
+
+    $causes = [Collections.Generic.List[object]]::new()
+    $explained = [Collections.Generic.HashSet[int]]::new()
+    foreach ($group in @($Events | Group-Object Kind)) {
+        # Readings come every 3-12 s, so each stretch gets 2 s of slack on both sides; overlaps merge.
+        $spans = [Collections.Generic.List[object]]::new()
+        foreach ($stretch in @($group.Group | Sort-Object From)) {
+            $from = $stretch.From.AddSeconds(-2)
+            $to = $stretch.To.AddSeconds(2)
+            if ($from -lt $start) { $from = $start }
+            if ($to -gt $end) { $to = $end }
+            if ($to -le $from) { continue }
+            $last = if ($spans.Count -gt 0) { $spans[$spans.Count - 1] } else { $null }
+            if ($last -and $from -le $last.To) { if ($to -gt $last.To) { $last.To = $to } }
+            else { $spans.Add([pscustomobject]@{ From = $from; To = $to }) }
+        }
+        $covered = 0.0
+        foreach ($span in $spans) { $covered += ($span.To - $span.From).TotalSeconds }
+        if ($covered -lt 10 -or ($seconds - $covered) -lt 60) { continue }
+        $inside = @(for ($i = 0; $i -lt $total; $i++) {
+            foreach ($span in $spans) { if ($hitches[$i].At -ge $span.From -and $hitches[$i].At -le $span.To) { $i; break } }
+        })
+        $outside = $total - $inside.Count
+        if ($inside.Count -lt 3) { continue }
+        if ($outside -gt 0 -and ($inside.Count / $covered) -lt 2 * ($outside / ($seconds - $covered))) { continue }
+        $causes.Add([pscustomobject]@{ Kind = $group.Name; Hits = $inside.Count })
+        foreach ($i in $inside) { [void]$explained.Add($i) }
+    }
+    $result.Causes = @($causes | Sort-Object Hits -Descending)
+    $result.Unexplained = $total - $explained.Count
+    return $result
 }
 
 # ---------------------------------------------------------------- summary
@@ -278,6 +400,8 @@ function Complete-GameSession {
     $script:session = $null
     $ping = $script:pingMonitor
     $script:pingMonitor = $null
+    $frameWatch = $script:frameWatch
+    $script:frameWatch = $null
     if ($s.Games.Count -eq 0) { return }
 
     $now = Get-SessionNow
@@ -303,6 +427,31 @@ function Complete-GameSession {
     $ram = if ($s.MinFreeRamGb -lt [double]::MaxValue) { 'boş RAM en düşük {0:0.0} GB' -f $s.MinFreeRamGb } else { 'boş RAM ölçülmedi' }
     if ($s.PeakGameRamBytes -gt 0) { $ram += ' · oyunun RAM''i en yüksek {0:0.0} GB' -f ($s.PeakGameRamBytes / 1GB) }
     $lines.Add("  RAM: $ram")
+
+    if ($ping) { foreach ($at in @($ping.SpikeTimes(50))) { Add-SessionEvent $s 'wifi' $at.AddSeconds(-3) $at.AddSeconds(2) } }
+    $hitch = if ($frameWatch) { Get-HitchAnalysis $frameWatch $s.Events } else { $null }
+    if ($hitch) {
+        $frameLine = "  Kare süresi: ortalama $($hitch.Fps) FPS, %1 düşük $($hitch.LowFps) FPS"
+        if ($hitch.Hitches -eq 0) { $frameLine += ', takılma yok' }
+        else { $frameLine += ', {0} takılma ({1:0.#}/dk, en kötü {2} ms)' -f $hitch.Hitches, $hitch.PerMinute, $hitch.WorstMs }
+        $lines.Add($frameLine)
+        if ($hitch.Causes.Count -gt 0) {
+            $named = @($hitch.Causes | ForEach-Object { '{0} ({1}/{2})' -f (Get-HitchCauseInfo $_.Kind)[0], $_.Hits, $hitch.Hitches })
+            $lines.Add("  Takılmaların nedeni: $($named -join ', ')")
+            foreach ($cause in $hitch.Causes) {
+                $info = Get-HitchCauseInfo $cause.Kind
+                $notes.Add((New-Alert 'warning' "Takılmalar: $($info[0])" "$($hitch.Hitches) takılmanın $($cause.Hits) tanesi $($info[0]) sırasında oldu. $($info[1])"))
+            }
+        }
+        if ($hitch.Hitches -ge 5 -and $hitch.Unexplained * 2 -ge $hitch.Hitches) {
+            $lines.Add("  $($hitch.Unexplained) takılma bilinen bir arka plan olayıyla çakışmadı: oyunun kendisi olabilir (shader derleme, yükleme).")
+            if ($hitch.PerMinute -ge 1 -and $hitch.Causes.Count -eq 0) {
+                $notes.Add((New-Alert 'info' 'Oyun sık takıldı' ('Dakikada ~{0:0.#} takılma; hiçbiri arka plandaki bir işle çakışmadı. Çoğu zaman oyunun shader derlemesidir: sürücü veya oyun güncellemesinden sonraki ilk oyunlarda normaldir, sonra azalır.' -f $hitch.PerMinute)))
+            }
+        }
+    } elseif ($frameWatch) {
+        $lines.Add("  Kare süresi: ölçülemedi (yeterli kare verisi gelmedi$(if ($frameWatch.Error) { ": $($frameWatch.Error)" }))")
+    } elseif ($s.FrameNote) { $lines.Add("  Kare süresi: $($s.FrameNote)") }
 
     if ($ping) {
         $stats = $ping.Stats(50)
@@ -348,6 +497,7 @@ function Complete-GameSession {
         PingSent = $pingStats[0]; PingLost = $pingStats[1]; PingSpikes = $pingStats[4]
         ChargerWeak = [bool]$s.ChargerDrop; OnBattery = [bool]$s.PlayedOnBattery
         DownloadSeconds = [math]::Round($s.NetHeavySeconds); UpdateSeconds = [math]::Round($s.UpdateSeconds)
+        Hitches = $(if ($hitch) { $hitch.Hitches } else { $null }); HitchCauses = @(if ($hitch) { $hitch.Causes | ForEach-Object { $_.Kind } })
     })
     Update-TrendAlerts
 }
@@ -405,6 +555,16 @@ function Update-TrendAlerts {
         $charger = @($recent | Where-Object ChargerWeak).Count
         if ($charger -ge 2) {
             $alerts.Add((New-Alert 'warning' 'Şarj aleti oyunlarda yetmiyor' "Son $n oyunun $charger tanesinde prizdeyken pil düştü. Laptopun kendi yüksek watt'lı adaptörünü kullan."))
+        }
+        # The same cause behind the hitches in two or more of the last games.
+        $causeGames = @{}
+        foreach ($record in $recent) {
+            foreach ($kind in @($record.HitchCauses | Where-Object { $_ } | Sort-Object -Unique)) { $causeGames[$kind] = 1 + [int]$causeGames[$kind] }
+        }
+        foreach ($kind in @($causeGames.Keys)) {
+            $info = Get-HitchCauseInfo $kind
+            if ($causeGames[$kind] -lt 2 -or -not $info) { continue }
+            $alerts.Add((New-Alert 'warning' "Takılmalar sık sık: $($info[0])" "Son $n oyunun $($causeGames[$kind]) tanesinde takılmalar $($info[0]) sırasında yoğunlaştı. $($info[1])"))
         }
     }
     $script:trendAlerts = @($alerts)

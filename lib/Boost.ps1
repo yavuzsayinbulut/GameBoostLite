@@ -600,6 +600,7 @@ function Set-ActivityNotice {
 function Watch-BackgroundActivity {
     param($Snapshot)
     $busy = [GameBoostEngine]::SampleActivity($Snapshot, 5.0, 1200MB)
+    Add-SessionBusyApps $busy
     $now = [datetime]::UtcNow
     $strikes = @{}
     $alerts = [Collections.Generic.List[object]]::new()

@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Globalization;
 using System.IO;
 using System.Net;
 using System.Net.NetworkInformation;
@@ -1212,6 +1213,8 @@ public sealed class GameBoostLineReader {
 public sealed class GameBoostPingMonitor {
     readonly object sync = new object();
     readonly List<double> times = new List<double>();
+    readonly List<DateTime> replyTimes = new List<DateTime>();   // when each of `times` came back (UTC)
+    readonly List<DateTime> lostTimes = new List<DateTime>();
     int sent, lost;
     volatile bool stopped;
 
@@ -1223,10 +1226,11 @@ public sealed class GameBoostPingMonitor {
                         PingReply reply = ping.Send(host, timeoutMs);
                         lock (sync) {
                             sent++;
-                            if (reply != null && reply.Status == IPStatus.Success) { if (times.Count < 5000) times.Add(reply.RoundtripTime); }
-                            else lost++;
+                            if (reply != null && reply.Status == IPStatus.Success) {
+                                if (times.Count < 5000) { times.Add(reply.RoundtripTime); replyTimes.Add(DateTime.UtcNow); }
+                            } else AddLost();
                         }
-                    } catch { lock (sync) { sent++; lost++; } }
+                    } catch { lock (sync) { sent++; AddLost(); } }
                     for (int waited = 0; waited < intervalMs && !stopped; waited += 250) Thread.Sleep(250);
                 }
             }
@@ -1238,6 +1242,11 @@ public sealed class GameBoostPingMonitor {
 
     public void Stop() { stopped = true; }
 
+    void AddLost() {
+        lost++;
+        if (lostTimes.Count < 5000) lostTimes.Add(DateTime.UtcNow);
+    }
+
     // { sent, lost, average ms, maximum ms, replies at or above spikeMs }
     public double[] Stats(double spikeMs) {
         lock (sync) {
@@ -1246,6 +1255,197 @@ public sealed class GameBoostPingMonitor {
             return new double[] { sent, lost, times.Count > 0 ? Math.Round(sum / times.Count, 1) : -1, max, spikes };
         }
     }
+
+    // When the replies at or above spikeMs and the lost pings happened (UTC), oldest first.
+    public DateTime[] SpikeTimes(double spikeMs) {
+        lock (sync) {
+            var result = new List<DateTime>(lostTimes);
+            for (int i = 0; i < times.Count; i++) if (times[i] >= spikeMs) result.Add(replyTimes[i]);
+            result.Sort();
+            return result.ToArray();
+        }
+    }
+}
+
+// One frame far longer than the frames just before it, while the game was in front.
+public sealed class GameBoostHitch {
+    public DateTime At;          // UTC, when the long frame ended
+    public double FrameMs;
+    public double TypicalMs;     // median of the frames before it
+}
+
+// The game's frame times during BOOST, for the hitch analysis. One PresentMon process writes a CSV
+// line per frame to stdout; only a summary is kept (a frame-time histogram and the hitches).
+public sealed class GameBoostFrameWatch {
+    readonly object sync = new object();
+    readonly int[] histogram = new int[10001];          // 0.1 ms steps up to 1 s
+    readonly double[] recent = new double[120];         // the frames before the current one (ring)
+    readonly double[] sorted = new double[120];
+    readonly List<GameBoostHitch> hitches = new List<GameBoostHitch>();
+    readonly Dictionary<string, int> swapChains = new Dictionary<string, int>();
+    Process process;
+    System.Threading.Timer foregroundTimer;
+    int processId;
+    int timeColumn = -1, frameColumn = -1, swapColumn = -1;
+    int recentCount, recentNext, swapChainLines;
+    string mainSwapChain;
+    long frames;
+    double frameMsTotal;
+    double offsetSeconds = double.MaxValue;             // wall clock (s) at the CSV's TimeInSeconds = 0
+    DateTime firstFrameUtc = DateTime.MinValue, lastFrameUtc = DateTime.MinValue, backgroundUtc = DateTime.MinValue;
+    bool frontSeen;
+    public volatile string Error;
+
+    // Measures this game. Another game restarts PresentMon; what was measured so far is kept.
+    public void Follow(string presentMonPath, int gameProcessId) {
+        Process old;
+        lock (sync) {
+            if (gameProcessId == processId) return;
+            old = process;
+            process = null;
+            processId = gameProcessId;
+            timeColumn = frameColumn = swapColumn = -1;
+            recentCount = recentNext = swapChainLines = 0;
+            swapChains.Clear();
+            mainSwapChain = null;
+            offsetSeconds = double.MaxValue;
+            frontSeen = false;
+            backgroundUtc = DateTime.MinValue;
+        }
+        Close(old);
+        if (foregroundTimer == null) foregroundTimer = new System.Threading.Timer(delegate { CheckForeground(); }, null, 0, 250);
+        try {
+            var info = new ProcessStartInfo(presentMonPath, "--process_id " + gameProcessId +
+                " --output_stdout --no_console_stats --v1_metrics --terminate_on_proc_exit" +
+                " --stop_existing_session --session_name GameBoostSession");
+            info.UseShellExecute = false;
+            info.CreateNoWindow = true;
+            info.RedirectStandardOutput = true;
+            var started = new Process();
+            started.StartInfo = info;
+            started.OutputDataReceived += delegate(object sender, DataReceivedEventArgs e) {
+                if (e.Data != null) AddLine(e.Data, gameProcessId);
+            };
+            started.Start();
+            GameBoostProcessJob.Assign(started);
+            started.BeginOutputReadLine();
+            lock (sync) { process = started; }
+        } catch (Exception error) { Error = error.Message; }
+    }
+
+    public void Stop() {
+        Process old;
+        lock (sync) { old = process; process = null; processId = -1; }
+        Close(old);
+        if (foregroundTimer != null) { foregroundTimer.Dispose(); foregroundTimer = null; }
+    }
+
+    static void Close(Process old) {
+        if (old == null) return;
+        try { if (!old.HasExited) old.Kill(); } catch { }
+        try { old.Dispose(); } catch { }
+    }
+
+    // A long frame around alt-tab is not a hitch. A game that is never the foreground window
+    // (drawn inside another process's window) is not filtered at all.
+    void CheckForeground() {
+        int foreground = GameBoostEngine.ForegroundProcessId();
+        lock (sync) {
+            if (processId <= 0) return;
+            if (foreground == processId) frontSeen = true;
+            else backgroundUtc = DateTime.UtcNow;
+        }
+    }
+
+    void AddLine(string line, int gameProcessId) {
+        double now = DateTime.UtcNow.Ticks / 1e7;
+        string[] columns = line.Split(',');
+        lock (sync) {
+            if (gameProcessId != processId) return;
+            if (frameColumn < 0) { ReadHeader(columns); return; }
+            if (timeColumn < 0 || columns.Length <= Math.Max(timeColumn, frameColumn)) return;
+            double time, frameMs;
+            if (!double.TryParse(columns[timeColumn], NumberStyles.Float, CultureInfo.InvariantCulture, out time) ||
+                !double.TryParse(columns[frameColumn], NumberStyles.Float, CultureInfo.InvariantCulture, out frameMs) ||
+                frameMs <= 0) return;
+            if (!IsMainSwapChain(swapColumn >= 0 && columns.Length > swapColumn ? columns[swapColumn] : "")) return;
+
+            // TimeInSeconds counts from PresentMon's start. Lines can wait in the pipe for a moment,
+            // so the smallest "now - time" seen is the best estimate of that start.
+            if (now - time < offsetSeconds) offsetSeconds = now - time;
+            DateTime at = new DateTime((long)((offsetSeconds + time) * 1e7), DateTimeKind.Utc);
+            if (firstFrameUtc == DateTime.MinValue) firstFrameUtc = at;
+            lastFrameUtc = at;
+            // Frames of a second or more are loading or a minimized game, not play: left out of the averages.
+            if (frameMs < 1000) {
+                frames++;
+                frameMsTotal += frameMs;
+                histogram[(int)(frameMs * 10)]++;
+            }
+
+            double typical = recentCount >= 60 ? Median() : 0;
+            recent[recentNext] = frameMs;
+            recentNext = (recentNext + 1) % recent.Length;
+            if (recentCount < recent.Length) recentCount++;
+            // Not judged: the first frames, loading screens and menus (under 20 FPS), around alt-tab.
+            if (typical <= 0 || typical > 50 || frameMs < Math.Max(2.5 * typical, typical + 20)) return;
+            if (frontSeen && (DateTime.UtcNow - backgroundUtc).TotalMilliseconds < frameMs + 1500) return;
+            // Long frames less than a second apart are one hitch.
+            GameBoostHitch last = hitches.Count > 0 ? hitches[hitches.Count - 1] : null;
+            if (last != null && (at - last.At).TotalSeconds < 1) {
+                if (frameMs > last.FrameMs) last.FrameMs = frameMs;
+                return;
+            }
+            if (hitches.Count >= 5000) return;
+            var hitch = new GameBoostHitch();
+            hitch.At = at;
+            hitch.FrameMs = frameMs;
+            hitch.TypicalMs = typical;
+            hitches.Add(hitch);
+        }
+    }
+
+    void ReadHeader(string[] columns) {
+        for (int i = 0; i < columns.Length; i++) {
+            string name = columns[i].Trim().Trim('"');
+            if (name.Equals("TimeInSeconds", StringComparison.OrdinalIgnoreCase)) timeColumn = i;
+            else if (name.Equals("MsBetweenPresents", StringComparison.OrdinalIgnoreCase)) frameColumn = i;
+            else if (name.Equals("SwapChainAddress", StringComparison.OrdinalIgnoreCase)) swapColumn = i;
+        }
+    }
+
+    // Some games also present from a small second swap chain (launcher view, overlay) whose slow
+    // frames would look like hitches. Follow the busiest one over the last ~1000 lines.
+    bool IsMainSwapChain(string swapChain) {
+        if (++swapChainLines >= 1000) { swapChainLines = 0; swapChains.Clear(); }
+        int count, mainCount = 0;
+        swapChains.TryGetValue(swapChain, out count);
+        swapChains[swapChain] = ++count;
+        if (mainSwapChain != null) swapChains.TryGetValue(mainSwapChain, out mainCount);
+        if (mainSwapChain == null || count > mainCount) mainSwapChain = swapChain;
+        return swapChain == mainSwapChain;
+    }
+
+    double Median() {
+        Array.Copy(recent, sorted, recentCount);
+        Array.Sort(sorted, 0, recentCount);
+        return sorted[recentCount / 2];
+    }
+
+    // { frames, average frame ms, 99th percentile frame ms (the "1% low"), seconds from first to last frame }
+    public double[] Stats() {
+        lock (sync) {
+            if (frames == 0) return new double[] { 0, 0, 0, 0 };
+            long limit = (long)Math.Ceiling(frames * 0.99), seen = 0;
+            int bin = 0;
+            for (; bin < histogram.Length - 1; bin++) { seen += histogram[bin]; if (seen >= limit) break; }
+            return new double[] { frames, frameMsTotal / frames, (bin + 1) / 10.0, (lastFrameUtc - firstFrameUtc).TotalSeconds };
+        }
+    }
+
+    public DateTime FirstFrameUtc { get { lock (sync) { return firstFrameUtc; } } }
+
+    public GameBoostHitch[] Hitches() { lock (sync) { return hitches.ToArray(); } }
 }
 
 public sealed class GameBoostAdapter {

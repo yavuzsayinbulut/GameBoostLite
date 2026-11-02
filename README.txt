@@ -77,6 +77,17 @@ OYUN SIRASINDA AKILLI UYARILAR VE OYUN ÖZETİ (yalnızca BOOST açıkken)
   uygulamalar), oyunun ekran kartı, en düşük boş RAM ve oyunun kendi RAM'i,
   modem gecikmesi ve sıçramaları (5 sn'de bir ping), arka plan indirme,
   Windows Update ve Defender'ın çalıştığı süre, güç durumu.
+- Takılma analizi (FPS ölçümüyle aynı koşul: NVIDIA FrameView ve FPS yetkisi):
+  BOOST boyunca oyunun kare süreleri PresentMon ile izlenir. Özette ortalama
+  FPS, %1 düşük FPS ve takılma sayısı yer alır. Takılma, oyun öndeyken hemen
+  önceki karelerin 2,5 katından (ve en az 20 ms) uzun süren karedir; yükleme
+  ekranları, menüler ve alt-tab sayılmaz. Her takılma o an olanlarla
+  karşılaştırılır: Defender, Windows Update, RAM'in 1 GB altına inmesi, arka
+  plan indirme, ekran kartı ısı yavaşlaması, Wi-Fi gecikme sıçraması ve arka
+  planda işlemciyi kullanan uygulamalar. Bir şey yalnızca o çalışırken
+  takılmalar oyunun geri kalanına göre en az iki kat sıksa neden diye
+  gösterilir; tesadüfi çakışmalar neden sayılmaz. Hiçbir olayla çakışmayan
+  takılmalar "oyunun kendisi olabilir (shader derleme, yükleme)" diye yazılır.
 - Okunamayan değerler "okunamadı / ölçülmedi" olarak yazılır. Hiçbir uyarı bir
   uygulamayı kapatmaz veya ayar değiştirmez.
 
@@ -183,8 +194,8 @@ OYUNA HAZIRLIK VE OYUN GEÇMİŞİ
 - Son 20 oyunun küçük özeti %LOCALAPPDATA%\GameBoostLite\sessions.json
   dosyasında tutulur (önce geçici dosyaya yazılıp sonra yerine konur).
 - Son 5 oyundan eğilim önerileri: RAM sık doluyor, ekran kartı sık ısınıyor,
-  Wi-Fi düzenli dalgalanıyor, şarj aleti yetmiyor, oyunlar çoğunlukla pilde.
-  Tek bir kötü oyun öneri üretmez.
+  Wi-Fi düzenli dalgalanıyor, şarj aleti yetmiyor, oyunlar çoğunlukla pilde,
+  takılmalar aynı nedenle tekrarlıyor. Tek bir kötü oyun öneri üretmez.
 
 BOOST NE YAPAR
 --------------
@@ -212,6 +223,8 @@ YÜK YARATMAMA
 - Pencere yalnızca öndeyken 6 sn'de bir yenilenir; küçükken veya oyun
   sırasında arayüz hiçbir şey okumaz.
 - BOOST'ta oyun bulunduktan sonra tam tarama 15 sn'de bir yapılır (~20 ms).
+- Takılma analizi için BOOST boyunca tek bir PresentMon süreci çalışır (ETW,
+  oyuna müdahale etmez); kareler saklanmaz, yalnızca özet ve takılmalar tutulur.
 - Sistem raporu, Bluetooth ve Wi-Fi sürücü bilgileri yalnızca sayfası
   açılınca okunur. Sistem raporu ayrı iş parçacığında hazırlanır.
 - PC Puanı parçaları bir kez okur (~0,2 sn); Yenile ile tekrar okunur.
