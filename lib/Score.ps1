@@ -366,7 +366,7 @@ function Get-SetupAlerts {
     $alerts = [Collections.Generic.List[object]]::new()
     foreach ($alert in (Get-SystemAlerts)) { $alerts.Add($alert) }
     try { foreach ($alert in (Get-DisplayAlerts $Monitors)) { $alerts.Add($alert) } } catch { }
-    foreach ($alert in @($script:insightCache.NetworkAlerts) + @($script:auditAlerts)) { if ($alert) { $alerts.Add($alert) } }
+    foreach ($alert in @($script:insightCache.NetworkAlerts) + @($script:auditAlerts) + @($script:securityAlerts)) { if ($alert) { $alerts.Add($alert) } }
     return $alerts
 }
 
@@ -520,60 +520,120 @@ function Measure-PcScore {
 # ---------------------------------------------------------------- how a game would run
 
 # Publishers' 1080p minimum and recommended specs (approximate), with the cards turned into the same
-# graphics scale as above. Name|aliases (exe / short names)|min GPU|rec GPU|VRAM min|VRAM rec|RAM min|RAM rec|flags
-# flags: ssd, dlss, fsr, esports (high refresh matters most), rt (needs a ray-tracing card)
+# graphics scale as above. Name|aliases (exe / short names)|year|min GPU|rec GPU|VRAM min|VRAM rec|RAM min|RAM rec|flags|tips
+# flags: ssd, dlss, fsr, esports (high refresh matters most), rt (needs a ray-tracing card). Tips are ';'-separated.
 $script:gameRequirementsText = @'
-Counter-Strike 2|cs2|1.8|4.0|1|2|8|16|esports,fsr
-VALORANT|valorant-win64-shipping|0.3|2.4|1|1|4|4|esports
-League of Legends|league of legends|0.3|1.0|1|1|4|8|esports
-Dota 2|dota2|0.5|2.0|1|2|4|8|esports,fsr
-Fortnite|fortniteclient-win64-shipping|0.3|2.6|1|4|8|16|esports,dlss,fsr
-Apex Legends|r5apex,r5apex_dx12|0.6|3.4|1|4|6|8|esports
-PUBG: BATTLEGROUNDS|tslgame|2.2|3.8|2|3|8|16|esports,dlss,fsr
-Rocket League|rocketleague|1.8|4.0|2|2|8|8|esports
-Overwatch 2|overwatch|0.8|4.0|2|3|6|8|esports,fsr
-Tom Clancy's Rainbow Six Siege|rainbowsix,rainbowsix_vulkan|2.4|5.4|4|6|8|16|esports,dlss,fsr
-Marvel Rivals|marvel-win64-shipping|4.0|8.7|6|8|16|16|esports,ssd,dlss,fsr
-Call of Duty|cod,blackops6|2.2|7.3|3|8|8|16|ssd,dlss,fsr
-Minecraft|javaw|0.5|1.5|1|2|4|8|
-Grand Theft Auto V|gta5,gta5_enhanced|1.0|2.4|1|2|4|8|
-Red Dead Redemption 2|rdr2|2.2|4.0|2|6|8|12|ssd,dlss,fsr
-Cyberpunk 2077|cyberpunk2077|4.0|8.7|6|8|12|16|ssd,dlss,fsr
-ELDEN RING|eldenring|3.8|6.0|3|8|12|16|ssd
-Baldur's Gate 3|bg3,bg3_dx11|3.4|8.7|4|8|8|16|ssd,dlss,fsr
-Hogwarts Legacy|hogwartslegacy|2.2|9.5|4|8|16|16|ssd,dlss,fsr
-Forza Horizon 5|forzahorizon5|3.4|6.0|4|8|8|16|ssd,dlss,fsr
-The Witcher 3: Wild Hunt|witcher3|1.6|4.0|2|4|6|8|dlss,fsr
-Euro Truck Simulator 2|eurotrucks2|1.0|2.4|1|2|4|8|
-EA SPORTS FC 25|fc25|2.4|5.4|4|6|8|12|
-Black Myth: Wukong|b1-win64-shipping|4.0|7.5|6|6|16|16|ssd,dlss,fsr
-HELLDIVERS 2|helldivers2|2.4|7.5|4|6|8|16|ssd,fsr
-Palworld|palworld-win64-shipping|1.8|9.0|2|8|16|32|ssd,dlss,fsr
-Rust|rustclient|1.4|4.0|2|4|10|16|ssd,dlss
-Mount & Blade II: Bannerlord|bannerlord|1.6|3.8|2|3|6|8|ssd,dlss,fsr
-Valheim|valheim|1.6|3.4|2|4|8|16|
-Genshin Impact|genshinimpact,yuanshen|0.8|4.0|2|4|8|16|
-Diablo IV|diabloiv|1.6|3.4|2|4|8|16|ssd,dlss,fsr
-Path of Exile 2|pathofexile_x64steam|2.2|7.5|4|6|8|16|ssd,dlss,fsr
-Monster Hunter Wilds|monsterhunterwilds|6.1|10.2|6|8|16|16|ssd,dlss,fsr
-Starfield|starfield|6.8|11|8|8|16|16|ssd,dlss,fsr
-Alan Wake 2|alanwake2|7.5|13.5|6|8|16|16|ssd,dlss
-The Last of Us Part I|tlou-i|3.4|10.2|4|8|16|16|ssd,dlss,fsr
-Ghost of Tsushima|ghostoftsushima|2.2|7.5|4|6|8|16|ssd,dlss,fsr
-God of War|gow|2.2|4.0|4|6|8|8|dlss,fsr
-Marvel's Spider-Man Remastered|spider-man|1.6|4.0|4|6|8|16|ssd,dlss,fsr
-Assassin's Creed Valhalla|acvalhalla|2.2|7.3|4|8|8|8|ssd
-Battlefield 2042|bf2042|2.4|8.7|4|8|8|16|ssd,dlss
-Battlefield 6|bf6|7.5|11.7|6|8|16|16|ssd,dlss,fsr
-Sons Of The Forest|sonsoftheforest|4.0|9.5|4|8|8|16|ssd,dlss
-ARK: Survival Ascended|arkascended|7.3|17.5|8|10|16|32|ssd,dlss
-DayZ|dayz_x64|1.8|4.0|2|4|8|12|
-S.T.A.L.K.E.R. 2: Heart of Chornobyl|stalker2-win64-shipping|4.0|14.7|6|8|16|32|ssd,dlss,fsr
-Kingdom Come: Deliverance II|kingdomcome|4.0|8.7|6|8|16|16|ssd,dlss,fsr
-Indiana Jones and the Great Circle|thegreatcircle|8.7|19|8|12|16|32|ssd,dlss,rt
-DOOM: The Dark Ages|doomthedarkages|8.7|17.8|8|10|16|32|ssd,dlss,rt
-Zula|zula|0.5|1.0|1|1|2|4|esports
-Metin2|metin2client|0.2|0.5|1|1|2|4|
+Counter-Strike 2|cs2|2023|1.8|4.0|1|2|8|16|esports,fsr|Gölge kalitesi Orta: rakip gölgeleri görünür kalır;Kenar yumuşatma 4x MSAA veya CMAA2;FSR kapalı: görüntüyü bulanıklaştırır
+VALORANT|valorant-win64-shipping|2020|0.3|2.4|1|1|4|4|esports|Malzeme ve Doku Orta, Netlik Açık;Vinyet, Bloom ve Bozulma kapalı;Kenar yumuşatma MSAA 2x
+League of Legends|league of legends|2009|0.3|1.0|1|1|4|8|esports|Gölgeler Orta, Efektler Yüksek rahat;FPS sınırını ekranın Hz'ine yakın tut
+Dota 2|dota2|2013|0.5|2.0|1|2|4|8|esports,fsr|Ortam perdeleme ve Hacimsel sis kapalı;Render kalitesi %100
+Fortnite|fortniteclient-win64-shipping|2017|0.3|2.6|1|4|8|16|esports,dlss,fsr|Rekabet için Performans modu: en yüksek FPS;DirectX 12'de Nanite ve Lumen kapalı;Görüş mesafesi Orta-Uzak
+Apex Legends|r5apex,r5apex_dx12|2019|0.6|3.4|1|4|6|8|esports|Doku akış bütçesi video belleğine göre;Ortam perdeleme kapalı, Gölge kapsamı Düşük;Model detayı Orta
+PUBG: BATTLEGROUNDS|tslgame|2017|2.2|3.8|2|3|8|16|esports,dlss,fsr|Görüş mesafesi Orta, Gölgeler Çok düşük;Kenar yumuşatma Yüksek: uzak hedefler net;Efektler ve Bitki Çok düşük
+Rocket League|rocketleague|2015|1.8|4.0|2|2|8|8|esports|Dünya detayı Performans;Yüksek kaliteli gölgeler ve Hava efektleri kapalı
+Overwatch 2|overwatch|2022|0.8|4.0|2|3|6|8|esports,fsr|Render ölçeği %100 (Özel);Gölge Düşük, Yerel yansımalar kapalı;NVIDIA Reflex Açık + Boost
+Tom Clancy's Rainbow Six Siege|rainbowsix,rainbowsix_vulkan|2015|2.4|5.4|4|6|8|16|esports,dlss,fsr|Vulkan sürümü genelde daha akıcı;Gölge ve Yansıma Düşük;Render ölçeği %100
+Marvel Rivals|marvel-win64-shipping|2024|4.0|8.7|6|8|16|16|esports,ssd,dlss,fsr|Global aydınlatma ve Yansımalar Düşük;Gölgeler Düşük, Sahne detayı Orta
+Call of Duty: Black Ops 6 / Warzone|call of duty,cod,blackops6,cod24-cod|2024|2.2|7.3|3|8|8|16|esports,ssd,dlss,fsr|VRAM kullanım hedefi %80;Gölgeler ve Ekran alanı yansımaları Düşük;Doku Düşük-Normal: 4 GB'ta Yüksek takılır
+Battlefield 6|bf6|2025|7.5|11.7|6|8|16|16|esports,ssd,dlss,fsr|Arazi ve Hacimsel kalite Düşük;Gölge Orta
+The Finals|discovery|2023|6.0|9.0|6|8|12|16|esports,ssd,dlss,fsr|Global aydınlatma Statik;Gölgeler ve Hacimsel efektler Düşük
+Delta Force|deltaforceclient-win64-shipping|2024|2.2|6.1|4|6|8|16|esports,dlss,fsr|Gölgeler Düşük, Bitki Orta;Görüş mesafesi Orta
+Escape from Tarkov|escapefromtarkov|2017|2.2|4.0|2|4|16|32|ssd,dlss,fsr|Çözünürlük ölçeği %100, DLSS/FSR Kalite;Gölgeler Orta, Çim gölgeleri kapalı;16 GB RAM'i doldurur: arka planı kapat
+War Thunder|aces|2012|0.8|4.0|1|4|4|16|esports,dlss,fsr|Ön ayar Film yerine Orta;Bulut Düşük, Çim Orta
+World of Tanks|worldoftanks|2010|0.8|3.4|1|2|4|8|esports|Standart istemci, Gölge Orta;Ağaç detayı Orta
+Destiny 2|destiny2|2017|1.6|3.4|2|4|6|8|esports|Hacimsel ışık ve Alan derinliği Düşük;Gölge Orta
+Zula|zula|2016|0.5|1.0|1|1|2|4|esports|Gölge ve Efekt Orta;FPS sınırını kaldır
+Metin2|metin2client|2004|0.2|0.5|1|1|2|4||En yüksek ayarlar bile rahat
+Grand Theft Auto V Enhanced|gta5_enhanced|2025|2.6|8.7|4|8|8|16|ssd,dlss,fsr|Işın izleme kapalı;Doku Normal (4 GB);DLSS Kalite
+Grand Theft Auto V|gta5|2015|1.0|2.4|1|2|4|8||MSAA kapalı, FXAA açık;Çim kalitesi Yüksek (Çok yüksek ağır);Gelişmiş görüş mesafesi düşük
+Red Dead Redemption 2|rdr2|2019|2.2|4.0|2|6|8|12|ssd,dlss,fsr|Hacimsel aydınlatma ve Raymarch Düşük-Orta;Su fiziği ve Ağaç tessellation kapalı;MSAA kapalı, TAA Orta
+Cyberpunk 2077|cyberpunk2077|2020|4.0|8.7|6|8|12|16|ssd,dlss,fsr|Kalabalık yoğunluğu Düşük-Orta (işlemci);Ekran alanı yansımaları ve Hacimsel sis Düşük;Işın izleme kapalı
+ELDEN RING NIGHTREIGN|nightreign|2025|3.8|6.0|3|8|12|16|ssd|Gölge ve Global aydınlatma Orta;Hareket bulanıklığı kapalı
+ELDEN RING|eldenring|2022|3.8|6.0|3|8|12|16|ssd|Gölge ve Global aydınlatma Orta;Hareket bulanıklığı kapalı;Oyun 60 FPS ile sınırlı
+Baldur's Gate 3|bg3,bg3_dx11|2023|3.4|8.7|4|8|8|16|ssd,dlss,fsr|Gölge Orta, Hacimsel bulut Düşük;3. bölüm şehrinde işlemci sınırı olabilir
+Hogwarts Legacy|hogwartslegacy|2023|2.2|9.5|4|8|16|16|ssd,dlss,fsr|Doku Düşük-Orta: 4 GB'ta takılma yapar;Kalabalık ve Bitki Orta;Işın izleme kapalı
+Forza Horizon 5|forzahorizon5|2021|3.4|6.0|4|8|8|16|ssd,dlss,fsr|Ayarlardaki VRAM göstergesi kırmızıya geçmesin;Ayna ve Araç modeli Orta
+Forza Motorsport|forza_gaming.desktop.x64_release_final|2023|4.0|9.0|6|8|16|16|ssd,dlss,fsr|Işın izleme kapalı;Doku ve Pist detayı Orta
+The Witcher 3: Wild Hunt|witcher3|2015|1.6|4.0|2|4|6|8|dlss,fsr|NVIDIA HairWorks kapalı;Çim yoğunluğu Orta;DX11 sürümü daha akıcı
+Euro Truck Simulator 2|eurotrucks2|2012|1.0|2.4|1|2|4|8||Ölçekleme %100 (üstü çok ağır);Yansıma Orta
+EA SPORTS FC 26|fc26|2025|2.4|5.4|4|6|8|12||Kalabalık ve Çim Orta;Kare hızını 60 ile sınırla
+EA SPORTS FC 25|fc25|2024|2.4|5.4|4|6|8|12||Kalabalık ve Çim Orta;Kare hızını 60 ile sınırla
+Black Myth: Wukong|b1-win64-shipping|2024|4.0|7.5|6|6|16|16|ssd,dlss,fsr|Global aydınlatma ve Hacimsel sis Orta;Bitki Orta;Kare üretimi yalnızca RTX 40/50'de
+HELLDIVERS 2|helldivers2|2024|2.4|7.5|4|6|8|16|ssd,fsr|Render ölçeği Kalite;Gölge Orta, Hacimsel bulut Düşük
+Palworld|palworld-win64-shipping|2024|1.8|9.0|2|8|16|32|ssd,dlss,fsr|Görüş mesafesi Orta, Çim Düşük;Gölgeler Orta
+Rust|rustclient|2018|1.4|4.0|2|4|10|16|ssd,dlss|Grass displacement kapalı;Gölge kaskadı 2;Ağaç kalitesi Düşük
+Mount & Blade II: Bannerlord|bannerlord|2022|1.6|3.8|2|3|6|8|ssd,dlss,fsr|Savaş boyutu 500: işlemci yükü;Çim Düşük, Gölge Orta
+Valheim|valheim|2021|1.6|3.4|2|4|8|16||Çim ve Gölge Orta;Hacimsel bulutlar Düşük
+Genshin Impact|genshinimpact,yuanshen|2020|0.8|4.0|2|4|8|16||Hacimsel sis kapalı;Kalabalık Orta;FPS 60
+Honkai: Star Rail|starrail|2023|0.8|4.0|2|4|8|16||Yansıma Orta;FPS 60
+Wuthering Waves|wuthering waves|2024|4.0|7.5|4|6|16|16|ssd,dlss,fsr|Hacimsel sis Düşük;Gölge Orta
+Zenless Zone Zero|zenlesszonezero|2024|2.2|4.0|2|4|8|16||Yansıma Orta;FPS 60
+Diablo IV|diabloiv|2023|1.6|3.4|2|4|8|16|ssd,dlss,fsr|Doku kalitesi Orta (4 GB);Fizik ve Hacimsel aydınlatma Düşük
+Path of Exile 2|pathofexile_x64steam|2024|2.2|7.5|4|6|8|16|ssd,dlss,fsr|Global aydınlatma Düşük;Gölge Orta;Dinamik çözünürlük açık
+Monster Hunter Wilds|monsterhunterwilds|2025|6.1|10.2|6|8|16|16|ssd,dlss,fsr|Doku Düşük (video belleği);Mesafe Orta;Kare üretimi kapalı
+Starfield|starfield|2023|6.8|11|8|8|16|16|ssd,dlss,fsr|Hacimsel aydınlatma ve Kontakt gölgeleri Düşük;Kalabalık Düşük
+Alan Wake 2|alanwake2|2023|7.5|13.5|6|8|16|16|ssd,dlss|Mesh shader ister: GTX 10 serisi çok zorlanır;Hacimsel ışık Düşük;Path tracing kapalı
+The Last of Us Part II Remastered|tlou-ii|2025|4.0|8.7|6|8|16|16|ssd,dlss,fsr|Doku Orta;Hacimsel efektler Düşük
+The Last of Us Part I|tlou-i|2023|3.4|10.2|4|8|16|16|ssd,dlss,fsr|Doku Orta: ayarlardaki VRAM çubuğu taşmasın;Hacimsel efektler Düşük
+Ghost of Tsushima|ghostoftsushima|2024|2.2|7.5|4|6|8|16|ssd,dlss,fsr|Hacimsel sis ve Seviye detayı Orta;DLSS Kalite
+God of War Ragnarök|gowr|2024|4.0|8.7|6|8|8|16|ssd,dlss,fsr|Gölgeler ve Hacimsel efektler Orta;DLSS Kalite
+God of War|gow|2022|2.2|4.0|4|6|8|8|dlss,fsr|Gölgeler Orta, Yansımalar Düşük;Ortam perdeleme Normal
+Marvel's Spider-Man 2|spider-man2|2025|4.7|8.7|4|8|16|16|ssd,dlss,fsr|Işın izlemeli yansımalar kapalı;Kalabalık Orta;Doku Orta
+Marvel's Spider-Man: Miles Morales|milesmorales|2022|1.6|4.0|4|6|8|16|ssd,dlss,fsr|Kalabalık ve Trafik yoğunluğu Düşük-Orta (işlemci);Hava parçacıkları Orta
+Marvel's Spider-Man Remastered|spider-man|2022|1.6|4.0|4|6|8|16|ssd,dlss,fsr|Kalabalık ve Trafik yoğunluğu Düşük-Orta (işlemci);Hava parçacıkları Orta
+Assassin's Creed Shadows|acshadows|2025|6.0|11.7|8|8|16|16|ssd,dlss,fsr|Işın izlemeli GI Seçili alanlar veya kapalı;Bitki ve Doku Orta
+Assassin's Creed Mirage|acmirage|2023|4.0|6.3|6|8|8|16|ssd,dlss,fsr|Hacimsel bulutlar Düşük;Gölge Orta
+Assassin's Creed Valhalla|acvalhalla|2020|2.2|7.3|4|8|8|8|ssd|Hacimsel bulutlar Düşük: büyük kazanç;Gölgeler Orta
+Battlefield 2042|bf2042|2021|2.4|8.7|4|8|8|16|ssd,dlss|Arazi ve Hacimsel kalite Düşük;Gelecek kare oluşturma açık
+Sons Of The Forest|sonsoftheforest|2024|4.0|9.5|4|8|8|16|ssd,dlss|Çim mesafesi Düşük;Hacimsel bulutlar kapalı;Gölge Orta
+ARK: Survival Ascended|arkascended|2023|7.3|17.5|8|10|16|32|ssd,dlss|Lumen GI Düşük;Çim Düşük;çok ağır bir oyun
+DayZ|dayz_x64|2018|1.8|4.0|2|4|8|12||Görüş mesafesi 1600-2000 m;Bulut kalitesi Düşük
+S.T.A.L.K.E.R. 2: Heart of Chornobyl|stalker2-win64-shipping|2024|4.0|14.7|6|8|16|32|ssd,dlss,fsr|Global aydınlatma Düşük;Bitki Orta;işlemci de zorlanır
+Kingdom Come: Deliverance II|kingdomcome|2025|4.0|8.7|6|8|16|16|ssd,dlss,fsr|Orta ön ayarla başla;Gölge ve Bitki Orta
+Indiana Jones and the Great Circle|thegreatcircle|2024|8.7|19|8|12|16|32|ssd,dlss,rt|
+DOOM: The Dark Ages|doomthedarkages|2025|8.7|17.8|8|10|16|32|ssd,dlss,rt|
+DOOM Eternal|doometernal|2020|2.4|6.0|4|8|8|8|dlss|Doku havuzu boyutu Düşük-Orta (video belleği);Çözünürlük ölçeği kapalı
+Resident Evil 4|re4|2023|2.4|6.0|4|8|8|16|ssd,fsr|Doku Orta: ayarlardaki VRAM sayacı taşmasın;Saç telleri kapalı;FSR 2 Kalite
+Resident Evil Village|re8|2021|2.4|6.0|4|8|8|16|fsr|Doku Orta;Hacimsel aydınlatma Düşük
+Dead Space|dead space|2023|6.0|9.0|8|8|16|16|ssd,dlss,fsr|Doku Orta;Hacimsel çözünürlük Düşük
+Star Wars Jedi: Survivor|jedisurvivor|2023|6.0|9.0|8|8|8|16|ssd,dlss,fsr|Işın izleme kapalı;Görüş mesafesi Orta;işlemci sınırı olabilir
+Lies of P|lop|2023|2.2|7.5|4|6|8|16|ssd,dlss,fsr|Gölge Orta;Hacimsel efektler Düşük
+ARMORED CORE VI FIRES OF RUBICON|armoredcore6|2023|3.6|4.0|4|6|12|12|ssd|Gölge ve Hacimsel efektler Orta
+Lords of the Fallen|lotf2|2023|4.0|11|6|8|16|16|ssd,dlss,fsr|Global aydınlatma Düşük;Gölge Orta
+Avatar: Frontiers of Pandora|afop|2023|6.0|11.7|8|8|16|16|ssd,dlss,fsr|Bitki ve Hacimsel sis Düşük;Doku Orta
+FINAL FANTASY XVI|ffxvi|2024|6.0|11|8|8|16|16|ssd,dlss,fsr|Gölge Orta;Kalabalık Düşük
+FINAL FANTASY VII REBIRTH|ff7rebirth|2025|6.0|9.0|8|8|16|16|ssd,dlss|Doku Orta;Arka plan model detayı Düşük
+Dragon's Dogma 2|dd2|2024|6.0|11|8|8|16|16|ssd,dlss,fsr|Şehirde ve kalabalıkta işlemci sınırı olur;Gölge Orta
+Horizon Forbidden West|horizonforbiddenwest|2024|3.6|8.7|4|8|16|16|ssd,dlss,fsr|Doku ve Seviye detayı Orta
+Silent Hill 2|shproto-win64-shipping|2024|6.8|11|8|8|16|16|ssd,dlss,fsr|Işın izleme kapalı;Gölge Orta
+Warhammer 40,000: Space Marine 2|spacemarine2|2024|4.0|13.5|6|8|8|16|ssd,dlss,fsr|Kalabalık Düşük-Orta (işlemci);Gölge Orta
+Star Wars Outlaws|outlaws|2024|5.4|11.7|6|8|16|16|ssd,dlss,fsr|Bitki ve Hacimsel sis Düşük;Doku Orta
+Need for Speed Unbound|needforspeedunbound|2022|2.4|9.0|4|8|8|16|ssd,dlss,fsr|Yansıma ve Gölge Orta
+F1 25|f1_25|2025|3.6|8.7|6|8|8|16|ssd,dlss,fsr|Işın izleme kapalı;Kalabalık Düşük
+Clair Obscur: Expedition 33|sandfall-win64-shipping|2025|6.1|11.7|6|8|8|16|ssd,dlss,fsr|Global aydınlatma Düşük;Gölge Orta
+Mafia: The Old Country|mafiatheoldcountry|2025|6.1|13.5|6|8|16|16|ssd,dlss,fsr|Global aydınlatma Düşük;Bitki Orta
+Senua's Saga: Hellblade II|hellblade2-win64-shipping|2024|6.0|13.5|8|8|16|16|ssd,dlss,fsr|Global aydınlatma Düşük;Gölge Orta
+Ratchet & Clank: Rift Apart|riftapart|2023|2.2|9.0|4|8|8|16|ssd,dlss,fsr|Işın izleme kapalı;Doku Orta
+Dying Light 2|dyinglightgame_x64_rwdi|2022|2.4|7.5|4|6|8|16|ssd,dlss,fsr|Hacimsel sis ve Bitki Orta;Işın izleme kapalı
+Hitman World of Assassination|hitman3|2021|1.6|6.0|2|8|8|16|dlss,fsr|Gölgeler ve Kalabalık Orta
+Death Stranding Director's Cut|ds|2022|1.8|4.0|4|6|8|8|dlss,fsr|Model detayı Orta;DLSS Kalite
+Days Gone|daysgone|2021|2.4|4.0|4|6|8|16|dlss,fsr|Kalabalık (sürü) ve Gölge Orta
+Sekiro: Shadows Die Twice|sekiro|2019|1.8|3.4|2|4|4|8||Gölge ve Doku Yüksek bile rahat;Hareket bulanıklığı kapalı
+Dark Souls III|darksoulsiii|2016|0.5|1.2|1|2|4|8||Tüm ayarlar Yüksek rahat
+Halo Infinite|haloinfinite|2021|2.4|9.0|4|8|8|16|ssd|Dinamik çözünürlük açık;Bulut ve Bitki Orta
+Phasmophobia|phasmophobia|2020|2.2|4.0|2|4|8|16||Gölge Orta;Yansıma Düşük
+Ready or Not|readyornot-win64-shipping|2023|2.2|6.0|4|6|8|16|dlss,fsr|Gölge Orta;Hacimsel efektler Düşük
+Satisfactory|factorygamesteam-win64-shipping|2024|3.6|11|4|8|8|16|dlss,fsr|Global aydınlatma Düşük;Görüş mesafesi Orta;büyük fabrikalarda işlemci sınırı
+Cities: Skylines II|cities2|2023|3.4|17.5|4|10|8|16|ssd,dlss,fsr|Alan derinliği ve Hacimsel bulut kapalı;Seviye detayı Düşük;çok ağır
+Microsoft Flight Simulator 2024|flightsimulator2024|2024|3.4|11|4|8|16|32|ssd,dlss,fsr|Arazi seviye detayı 100 altında;Bulutlar Orta;işlemci ve internet de önemli
+Assetto Corsa Competizione|ac2-win64-shipping|2019|0.8|6.0|2|6|8|16||Görüş mesafesi Orta;Ayna kalitesi Düşük
+The Sims 4|ts4_x64|2014|0.5|1.6|1|2|4|8||Tüm ayarlar Yüksek rahat
+Minecraft|javaw|2011|0.5|1.5|1|2|4|8||Görüş mesafesi 12-16 parça;Sodium modu FPS'i belirgin artırır
+Hollow Knight: Silksong|hollow knight silksong|2025|0.5|1.0|1|2|4|8||Her ayar rahat; FPS'i ekranın Hz'ine kilitle
+Hades II|hades2|2025|0.8|2.0|1|2|4|8||Her ayar rahat
+Lethal Company|lethal company|2023|1.0|2.4|1|2|4|8||Her ayar rahat
+Stardew Valley|stardew valley|2016|0.2|0.5|1|1|2|4||Her ayar rahat
+Terraria|terraria|2011|0.2|0.5|1|1|2|4||Her ayar rahat
 '@
 
 function ConvertTo-GameKey {
@@ -583,14 +643,15 @@ function ConvertTo-GameKey {
 
 $script:gameRequirements = @(foreach ($line in ($script:gameRequirementsText -split "`r?`n")) {
     $parts = $line.Split('|')
-    if ($parts.Count -lt 9) { continue }
+    if ($parts.Count -lt 11) { continue }
     $number = { param($Text) [double]::Parse($Text, [Globalization.CultureInfo]::InvariantCulture) }
     [pscustomobject]@{
-        Name = $parts[0]; Key = ConvertTo-GameKey $parts[0]
+        Name = $parts[0]; Key = ConvertTo-GameKey $parts[0]; Year = [int]$parts[2]
         Aliases = @($parts[1].Split(',') | Where-Object { $_ } | ForEach-Object { ConvertTo-GameKey $_ })
-        MinGpu = & $number $parts[2]; RecGpu = & $number $parts[3]
-        VramMin = & $number $parts[4]; VramRec = & $number $parts[5]; RamMin = & $number $parts[6]; RamRec = & $number $parts[7]
-        Flags = @($parts[8].Split(',') | Where-Object { $_ })
+        MinGpu = & $number $parts[3]; RecGpu = & $number $parts[4]
+        VramMin = & $number $parts[5]; VramRec = & $number $parts[6]; RamMin = & $number $parts[7]; RamRec = & $number $parts[8]
+        Flags = @($parts[9].Split(',') | Where-Object { $_ })
+        Tips = @($parts[10].Split(';') | Where-Object { $_ })
     }
 })
 
@@ -601,33 +662,38 @@ function Find-GameRequirement {
     foreach ($game in $script:gameRequirements) {
         if ($key -eq $game.Key -or $game.Aliases -contains $key) { return $game }
     }
-    # "Grand Theft Auto V Enhanced", "Call of Duty: Black Ops 6"...
+    # "Grand Theft Auto V Legacy", DLC and edition names...
     foreach ($game in $script:gameRequirements) {
         if ($game.Key.Length -ge 6 -and $key.StartsWith($game.Key)) { return $game }
     }
     return $null
 }
 
+# The main Steam folder and every extra library listed in libraryfolders.vdf.
+function Get-SteamLibraries {
+    $steam = Get-RegistryValue 'HKCU:\Software\Valve\Steam' 'SteamPath'
+    if (-not $steam) { return @() }
+    $libraries = [Collections.Generic.List[string]]::new()
+    $libraries.Add(($steam -replace '/', '\'))
+    $folders = Join-Path $libraries[0] 'steamapps\libraryfolders.vdf'
+    if (Test-Path -LiteralPath $folders) {
+        foreach ($match in [regex]::Matches([IO.File]::ReadAllText($folders), '"path"\s+"([^"]+)"')) { $libraries.Add(($match.Groups[1].Value -replace '\\\\', '\')) }
+    }
+    return @($libraries | Sort-Object -Unique)
+}
+
+function Get-EpicManifestFolder { return Join-Path $env:ProgramData 'Epic\EpicGamesLauncher\Data\Manifests' }
+
 # Game names from the Steam and Epic libraries, the Riot folder and earlier sessions.
 function Get-InstalledGameNames {
     $names = [Collections.Generic.List[string]]::new()
-    $steam = Get-RegistryValue 'HKCU:\Software\Valve\Steam' 'SteamPath'
-    if ($steam) {
-        $libraries = [Collections.Generic.List[string]]::new()
-        $libraries.Add(($steam -replace '/', '\'))
-        $folders = Join-Path $libraries[0] 'steamapps\libraryfolders.vdf'
-        if (Test-Path -LiteralPath $folders) {
-            foreach ($match in [regex]::Matches([IO.File]::ReadAllText($folders), '"path"\s+"([^"]+)"')) { $libraries.Add(($match.Groups[1].Value -replace '\\\\', '\')) }
-        }
-        foreach ($library in ($libraries | Sort-Object -Unique)) {
-            foreach ($manifest in @(Get-ChildItem -LiteralPath (Join-Path $library 'steamapps') -Filter 'appmanifest_*.acf' -ErrorAction SilentlyContinue)) {
-                $text = [IO.File]::ReadAllText($manifest.FullName)
-                if ($text -match '"name"\s+"([^"]+)"') { $names.Add($Matches[1]) }
-            }
+    foreach ($library in (Get-SteamLibraries)) {
+        foreach ($manifest in @(Get-ChildItem -LiteralPath (Join-Path $library 'steamapps') -Filter 'appmanifest_*.acf' -ErrorAction SilentlyContinue)) {
+            $text = [IO.File]::ReadAllText($manifest.FullName)
+            if ($text -match '"name"\s+"([^"]+)"') { $names.Add($Matches[1]) }
         }
     }
-    $epic = Join-Path $env:ProgramData 'Epic\EpicGamesLauncher\Data\Manifests'
-    foreach ($item in @(Get-ChildItem -LiteralPath $epic -Filter '*.item' -ErrorAction SilentlyContinue)) {
+    foreach ($item in @(Get-ChildItem -LiteralPath (Get-EpicManifestFolder) -Filter '*.item' -ErrorAction SilentlyContinue)) {
         try { $json = [IO.File]::ReadAllText($item.FullName) | ConvertFrom-Json; if ($json.DisplayName) { $names.Add($json.DisplayName) } } catch { }
     }
     foreach ($riot in @('VALORANT', 'League of Legends')) {
@@ -637,19 +703,48 @@ function Get-InstalledGameNames {
     return $names
 }
 
-# Table games, the ones found on this PC first.
+# Games found on this PC first, then the newest.
 function Get-GameChoices {
     $installed = [Collections.Generic.HashSet[string]]::new()
     foreach ($name in (Get-InstalledGameNames)) {
         $game = Find-GameRequirement $name
         if ($game) { [void]$installed.Add($game.Name) }
     }
-    return @($script:gameRequirements | Sort-Object @{ Expression = { -not $installed.Contains($_.Name) } }, Name | ForEach-Object {
-        [pscustomobject]@{ Game = $_; Installed = $installed.Contains($_.Name); Text = $(if ($installed.Contains($_.Name)) { "✓  $($_.Name)" } else { "    $($_.Name)" }) }
+    return @($script:gameRequirements | Sort-Object @{ Expression = { -not $installed.Contains($_.Name) } }, @{ Expression = 'Year'; Descending = $true }, Name | ForEach-Object {
+        $mark = if ($installed.Contains($_.Name)) { '✓  ' } else { '    ' }
+        [pscustomobject]@{ Game = $_; Installed = $installed.Contains($_.Name); Text = "$mark$($_.Name)  ($($_.Year))" }
     })
 }
 
 $script:gameLevels = @('Çalışmaz', 'Zorlanır', 'Düşük', 'Orta', 'Yüksek', 'Çok yüksek')
+
+# Settings to start from, worked out from the level, the video memory and the card.
+function Get-GraphicsAdvice {
+    param($Game, [int]$Level, [string]$GpuName, [double]$VramGb, [bool]$Laptop)
+    $advice = [Collections.Generic.List[string]]::new()
+    if ($Level -le 0) { $advice.Add('Bu ekran kartıyla oyun açılmaz; ayar önerisi yok.'); return $advice }
+    $esports = $Game.Flags -contains 'esports'
+    $rtx = $GpuName -match 'RTX'
+    $preset = if ($esports) { if ($Level -ge 4) { 'Düşük-Orta: rekabette en yüksek FPS ve netlik' } elseif ($Level -eq 3) { 'Düşük' } else { 'En düşük' } }
+        else { @('', 'En düşük', 'Düşük', 'Orta', 'Yüksek', 'Çok yüksek / Ultra')[$Level] }
+    $advice.Add("Ön ayar: $preset")
+    $texture = if ($VramGb -ge $Game.VramRec) { 'Yüksek' } elseif ($VramGb -ge ($Game.VramMin + $Game.VramRec) / 2) { 'Orta' } elseif ($VramGb -ge $Game.VramMin) { 'Düşük-Orta' } else { 'En düşük' }
+    $advice.Add("Doku kalitesi: $texture ($([math]::Round($VramGb)) GB video belleğine göre; takılma çoğunlukla bundan olur)")
+    $mode = if ($Level -le 2) { 'Dengeli' } else { 'Kalite' }
+    if ($Game.Flags -contains 'dlss' -and $rtx) { $advice.Add("DLSS: $mode (1080p'de Performans bulanıklaştırır)") }
+    elseif ($Game.Flags -contains 'fsr') { $advice.Add("FSR: $mode") }
+    else { $advice.Add('Çözünürlük ölçeği: %100 (oyunda DLSS / FSR yok)') }
+    $advice.Add($(if ($Level -le 3) { 'Gölgeler ve Hacimsel efektler: Düşük-Orta (en çok FPS kazandıranlar)' } else { 'Gölgeler: Yüksek' }))
+    $advice.Add($(if ($rtx -and $Level -ge 5 -and $VramGb -ge 8) { 'Işın izleme (varsa): Orta' } else { 'Işın izleme (varsa): kapalı' }))
+    if ($esports) {
+        $advice.Add('FPS sınırı: ekranın Hz''inin biraz üstü; V-Sync kapalı')
+        if ($rtx) { $advice.Add('NVIDIA Reflex (varsa): Açık + Boost') }
+    } elseif ($Laptop) { $advice.Add('FPS sınırı: 60 veya ekranın Hz''i; dizüstü daha serin ve sessiz çalışır') }
+    else { $advice.Add('FPS sınırı: ekranın Hz''i') }
+    $advice.Add('Hareket bulanıklığı ve Film greni: kapalı')
+    foreach ($tip in $Game.Tips) { $advice.Add("Bu oyunda: $tip") }
+    return $advice
+}
 
 # A rough expectation at 1080p from the publisher's specs. Not an FPS measurement.
 function Measure-GameEstimate {
@@ -688,10 +783,6 @@ function Measure-GameEstimate {
     if ($Game.Flags -contains 'ssd' -and -not (@($Data.Disks | Where-Object { $_.BusType -in 'NVMe', '17' -or $_.MediaType -in 'SSD', '4' }).Count)) {
         $notes.Add('SSD isteniyor; sabit diskte uzun yüklemeler ve takılmalar olur')
     }
-    if ($level -ge 2 -and $level -le 4) {
-        if ($Game.Flags -contains 'dlss' -and $best.Name -match 'RTX') { $notes.Add('DLSS destekli: Kalite modunda bir kademe yukarı çıkabilirsin') }
-        elseif ($Game.Flags -contains 'fsr') { $notes.Add('FSR destekli: biraz daha akıcılık için açabilirsin') }
-    }
 
     $esports = $Game.Flags -contains 'esports'
     $summary = switch ($level) {
@@ -705,7 +796,7 @@ function Measure-GameEstimate {
     if ($Data.Laptop) { $notes.Add('Dizüstü: prizde ve iyi soğutmada geçerli; pilde belirgin düşer') }
 
     # What this PC actually did in this game before.
-    $sessions = @(Get-SessionHistory | Where-Object { @($_.Games | Where-Object { (Find-GameRequirement ([string]$_)) -and (Find-GameRequirement ([string]$_)).Name -eq $Game.Name }).Count -gt 0 })
+    $sessions = @(Get-SessionHistory | Where-Object { @($_.Games | Where-Object { $match = Find-GameRequirement ([string]$_); $match -and $match.Name -eq $Game.Name }).Count -gt 0 })
     if ($sessions.Count -gt 0) {
         $last = $sessions[-1]
         $parts = @("$($last.Minutes) dk")
@@ -715,7 +806,10 @@ function Measure-GameEstimate {
         if ($last.OnBattery) { $parts += 'pilde' }
         $notes.Add("Bu PC'de son oturum: $($parts -join ' · ')")
     }
-    return [pscustomobject]@{ Game = $Game.Name; Level = $level; LevelName = $script:gameLevels[$level]; Summary = $summary; Notes = $notes }
+    return [pscustomobject]@{
+        Game = $Game.Name; Year = $Game.Year; Level = $level; LevelName = $script:gameLevels[$level]; Summary = $summary; Notes = $notes
+        Advice = (Get-GraphicsAdvice $Game $level $best.Name $vram ([bool]$Data.Laptop))
+    }
 }
 
 function Format-PcScoreText {

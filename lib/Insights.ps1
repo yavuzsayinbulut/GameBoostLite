@@ -363,6 +363,155 @@ function Invoke-BackgroundAuditScan {
     }
 }
 
+# ---------------------------------------------------------------- security check
+
+# Signs that the PC is watched, mines crypto or is infected. Self-contained (it also runs in the
+# audit's runspace). Read-only: nothing is closed, removed or changed; every finding says what to do.
+# -Quick (every 10 min, ~50 ms): processes, camera / microphone, proxy, mining ports, antivirus on/off.
+function Invoke-SecurityChecks {
+    param([switch]$Quick)
+    $findings = [Collections.Generic.List[object]]::new()
+    function Add-SecurityFinding {
+        param([string]$Kind, [string]$Severity, [string]$Name, [string]$Detail, [string]$Action, [string]$Path = '')
+        $findings.Add([pscustomobject]@{ Kind = $Kind; Severity = $Severity; Name = $Name; Path = $Path; Detail = $Detail; Action = $Action; Value = 0 })
+    }
+    $remotePattern = '^(anydesk|teamviewer|teamviewer_service|tv_w32|tv_x64|rustdesk|ultraviewer.*|splashtop.*|srservice|screenconnect.*|connectwise.*|ateraagent|ninjarmm.*|rutserv|rfusclient|remotepc.*|remoting_host|ammyy.*|aa_v3|radmin.*|rserver3|tvnserver|winvnc|vncserver|uvnc_service|logmein.*|lmiguardianagent|supremo.*|dwagent|aeroadmin|meshagent|tacticalrmm|simplehelp.*)$'
+    $ratPattern = 'njrat|darkcomet|remcos|asyncrat|quasar|nanocore|netwire|dcrat|xworm|orcus|venomrat|bitrat'
+    $minerPattern = 'xmrig|nicehash|minergate|phoenixminer|t-rex|lolminer|nbminer|gminer|ethminer|cpuminer|nanominer|teamredminer'
+    $proxyPattern = 'infatica|honeygain|pawns|packetstream|earnapp|iproyal|peer2profit|repocket|traffmonetizer|bitping|mysterium'
+    $offline = 'Windows Güvenliği > Virüs ve tehdit koruması > Tarama seçenekleri > Microsoft Defender Çevrimdışı tarama'
+
+    $names = @{}
+    foreach ($process in [Diagnostics.Process]::GetProcesses()) { $names[$process.Id] = $process.ProcessName }
+    $seen = @{}
+    foreach ($name in ($names.Values | Sort-Object -Unique)) {
+        if ($name -match $ratPattern) {
+            Add-SecurityFinding 'rat' 'critical' $name 'Bilinen bir uzaktan kontrol truva atının adını taşıyor.' "İnterneti kes, $offline yap; şifrelerini başka bir cihazdan değiştir."
+        } elseif ($name -match $remotePattern) {
+            Add-SecurityFinding 'remote' 'warning' $name 'Uzaktan erişim aracı çalışıyor: bağlanan kişi ekranını görüp bilgisayarı kontrol edebilir.' 'Kendin kurmadıysan veya şu an kimseye bağlantı vermiyorsan kapat, Ayarlar > Uygulamalar''dan kaldır.'
+        } elseif ($Quick -and $name -match $minerPattern) {
+            Add-SecurityFinding 'miner' 'critical' $name 'Kripto madencilik aracı çalışıyor.' "Sen kurmadıysan $offline yap ve kaldır."
+        } elseif ($Quick -and $name -match $proxyPattern) {
+            Add-SecurityFinding 'proxy' 'warning' $name 'İnternet bağlantını başkalarına kullandırıyor.' 'Ayarlar > Uygulamalar''dan kaldır (yönetici gerekir).'
+        }
+    }
+
+    # Windows keeps when each app last used the camera and microphone; a zero end time means "now".
+    $consent = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore'
+    $callApps = 'teams|zoom|discord|skype|whatsapp|chrome|msedge|firefox|opera|brave|obs|webex|slack|telegram|signal|camera|broadcast|steelseries|nahimic|realtek|soundrecorder'
+    foreach ($capability in @(@('webcam', 'Kamera', 'privacy-webcam'), @('microphone', 'Mikrofon', 'privacy-microphone'))) {
+        $entries = @(Get-ChildItem -LiteralPath (Join-Path $consent "$($capability[0])\NonPackaged") -ErrorAction SilentlyContinue) +
+            @(Get-ChildItem -LiteralPath (Join-Path $consent $capability[0]) -ErrorAction SilentlyContinue | Where-Object PSChildName -ne 'NonPackaged')
+        foreach ($entry in $entries) {
+            $values = Get-ItemProperty -LiteralPath $entry.PSPath -ErrorAction SilentlyContinue
+            if (-not $values -or -not $values.LastUsedTimeStart) { continue }
+            $app = $entry.PSChildName -replace '#', '\'
+            $short = if ($app -match '\\') { [IO.Path]::GetFileNameWithoutExtension($app) } else { ($app -split '_')[0] }
+            $expected = $app -match $callApps
+            if ($values.LastUsedTimeStop -eq 0) {
+                Add-SecurityFinding 'privacy-now' $(if ($expected) { 'info' } else { 'warning' }) "$($capability[1]) şu an kullanılıyor: $short" `
+                    $(if ($expected) { 'Görüşme / kayıt uygulaması.' } else { 'Tanıdık bir görüşme veya kayıt uygulaması değil.' }) `
+                    "Sen açmadıysan uygulamayı kapat; Ayarlar > Gizlilik ve güvenlik > $($capability[1])'dan izni kaldır." $app
+            } elseif (-not $Quick -and -not $expected) {
+                $last = [DateTime]::FromFileTime([int64]$values.LastUsedTimeStart)
+                if ($last -gt (Get-Date).AddDays(-1)) {
+                    Add-SecurityFinding 'privacy-recent' 'info' "$($capability[1]) son 24 saatte kullanıldı: $short" ('Son kullanım {0:dd.MM HH:mm}.' -f $last) 'Tanımıyorsan izinlerden kaldır.' $app
+                }
+            }
+        }
+    }
+
+    $internet = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction SilentlyContinue
+    if ($internet.ProxyEnable -eq 1 -and $internet.ProxyServer) {
+        Add-SecurityFinding 'proxy-setting' 'warning' "İnternet trafiği proxy'den geçiyor: $($internet.ProxyServer)" 'Tarayıcı trafiği bu sunucudan geçer; reklam ve casus yazılımlar bunu ayarlar.' 'Sen ayarlamadıysan Ayarlar > Ağ ve İnternet > Proxy''den kapat.'
+    }
+    if ($internet.AutoConfigURL) {
+        Add-SecurityFinding 'proxy-setting' 'warning' "Otomatik proxy betiği: $($internet.AutoConfigURL)" 'Trafiğin bir kısmı bu betiğin seçtiği sunucudan geçebilir.' 'Sen ayarlamadıysan Ayarlar > Ağ ve İnternet > Proxy > Kurulum betiğini kullan''ı kapat.'
+    }
+
+    $poolPorts = @(3333, 4444, 5555, 7777, 9999, 14433, 14444, 45560, 45700)
+    try {
+        foreach ($pair in [GameBoostConnections]::RemotePorts()) {
+            $name = $names[$pair[0]]
+            if ($poolPorts -notcontains $pair[1] -or -not $name -or $seen.ContainsKey($name)) { continue }
+            $seen[$name] = $true
+            Add-SecurityFinding 'miner-port' 'warning' $name "Madencilik havuzlarının sık kullandığı bir porta ($($pair[1])) bağlı." 'Tanımıyorsan Görev Yöneticisi > Ayrıntılar''da dosya konumunu aç, Defender ile tara ve kaldır.'
+        }
+    } catch { }
+
+    $products = @(Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct -ErrorAction SilentlyContinue)
+    $enabled = @($products | Where-Object { ($_.productState -band 0x1000) -ne 0 })
+    if ($products.Count -gt 0 -and $enabled.Count -eq 0) {
+        Add-SecurityFinding 'antivirus' 'critical' 'Virüs koruması kapalı' 'Hiçbir antivirüs etkin değil.' 'Windows Güvenliği > Virüs ve tehdit koruması''nı aç.'
+    }
+    foreach ($product in $enabled) {
+        if (($product.productState -band 0x10) -ne 0) {
+            Add-SecurityFinding 'antivirus' 'warning' "$($product.displayName) tanımları eski" 'Yeni tehditleri tanımayabilir.' 'Windows Güvenliği > Koruma güncelleştirmeleri > Güncelleştirmeleri denetle.'
+        }
+    }
+    if ($Quick) { return $findings }
+
+    try {
+        $defender = Get-MpComputerStatus -ErrorAction Stop
+        if ($defender.AntivirusEnabled -and -not $defender.RealTimeProtectionEnabled) {
+            Add-SecurityFinding 'antivirus' 'critical' 'Defender gerçek zamanlı koruma kapalı' 'Dosyalar açılırken taranmıyor.' 'Windows Güvenliği > Virüs ve tehdit koruması ayarları > Gerçek zamanlı koruma: açık.'
+        }
+        if ($defender.AntivirusEnabled -and $defender.QuickScanAge -gt 14) {
+            Add-SecurityFinding 'antivirus' 'info' "Son hızlı tarama $($defender.QuickScanAge) gün önce" '' 'Windows Güvenliği > Hızlı tarama.'
+        }
+    } catch { }
+    try {
+        foreach ($threat in @(Get-MpThreat -ErrorAction Stop)) {
+            if ($threat.IsActive) {
+                Add-SecurityFinding 'threat' 'critical' "Defender etkin tehdit: $($threat.ThreatName)" 'Henüz temizlenmemiş.' 'Windows Güvenliği > Koruma geçmişi''nden temizle, ardından tam tarama yap.'
+            } else {
+                Add-SecurityFinding 'threat' 'info' "Defender daha önce yakaladı: $($threat.ThreatName)" 'Temizlenmiş veya karantinada.' 'Koruma geçmişinden kontrol et; tekrar ediyorsa tam tarama yap.'
+            }
+        }
+    } catch { }
+    try {
+        $off = @(Get-NetFirewallProfile -ErrorAction Stop | Where-Object { -not $_.Enabled })
+        if ($off.Count -gt 0) { Add-SecurityFinding 'firewall' 'warning' "Güvenlik duvarı kapalı: $(($off | ForEach-Object Name) -join ', ')" 'Gelen bağlantılar süzülmüyor.' 'Windows Güvenliği > Güvenlik duvarı ve ağ koruması.' }
+    } catch { }
+    if ((Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -ErrorAction SilentlyContinue).fDenyTSConnections -eq 0) {
+        Add-SecurityFinding 'rdp' 'warning' 'Uzak Masaüstü açık' 'Ağdan bu bilgisayara uzaktan oturum açılabilir.' 'Kullanmıyorsan Ayarlar > Sistem > Uzak Masaüstü''nü kapat.'
+    }
+
+    # Hosts file: security and update sites redirected or blocked (privacy lists that block telemetry are fine).
+    $guarded = 'windowsupdate|update\.microsoft|defender|smartscreen|avast|avg\.com|kaspersky|eset|malwarebytes|bitdefender|mcafee|norton|sophos|virustotal'
+    $popular = 'google\.|facebook\.|instagram\.|steampowered|steamcommunity|epicgames|discord|microsoft\.com|live\.com|paypal|garanti|isbank|akbank|yapikredi|ziraat'
+    foreach ($line in @(Get-Content -LiteralPath "$env:SystemRoot\System32\drivers\etc\hosts" -ErrorAction SilentlyContinue)) {
+        if ($line -notmatch '^\s*([0-9a-fA-F:.]+)\s+(\S+)') { continue }
+        $address = $Matches[1]; $hostName = $Matches[2]
+        $blocked = $address -in '0.0.0.0', '127.0.0.1', '::1', '::'
+        if ($hostName -match $guarded) {
+            Add-SecurityFinding 'hosts' 'critical' "Hosts dosyası $hostName adresini $(if ($blocked) { 'engelliyor' } else { 'yönlendiriyor' })" 'Zararlı yazılımlar güvenlik güncellemelerini böyle durdurur.' "$offline yap; sonra hosts dosyasındaki satırı yönetici olarak sil."
+        } elseif (-not $blocked -and $hostName -match $popular) {
+            Add-SecurityFinding 'hosts' 'critical' "Hosts dosyası $hostName adresini $address'e yönlendiriyor" 'Sahte siteye (oltalama) götürebilir.' "$offline yap; sonra hosts dosyasındaki satırı yönetici olarak sil."
+        }
+    }
+
+    # Start-up entries that run hidden script commands (common for malware, rare for normal apps).
+    $scriptPattern = '(powershell|pwsh)\S*\s.*(-enc\b|-e\s|-encodedcommand|-w(indowstyle)?\s+h(idden)?\b|downloadstring|downloadfile|iex\b|invoke-expression|frombase64)|mshta(\.exe)?\s+["'']?(http|javascript|vbscript)|(wscript|cscript)(\.exe)?\s+.*\\(appdata|temp|users\\public)\\|rundll32(\.exe)?\s+.*javascript|regsvr32(\.exe)?\s+.*/i:http|certutil(\.exe)?\s+.*-urlcache'
+    $commands = [Collections.Generic.List[object]]::new()
+    try {
+        foreach ($task in Get-ScheduledTask -ErrorAction Stop) {
+            if ($task.State -eq 'Disabled') { continue }
+            foreach ($action in $task.Actions) { if ($action.Execute) { $commands.Add(@("Zamanlanmış görev $($task.TaskPath)$($task.TaskName)", "$($action.Execute) $($action.Arguments)")) } }
+        }
+    } catch { }
+    foreach ($key in 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run', 'HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce') {
+        $values = Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue
+        if ($values) { foreach ($property in $values.PSObject.Properties) { if ($property.Name -notlike 'PS*') { $commands.Add(@("Başlangıç kaydı $($property.Name)", [string]$property.Value)) } } }
+    }
+    foreach ($command in $commands) {
+        if ($command[1] -notmatch $scriptPattern) { continue }
+        $text = if ($command[1].Length -gt 140) { $command[1].Substring(0, 140) + '…' } else { $command[1] }
+        Add-SecurityFinding 'script-start' 'warning' $command[0] "Gizli veya internetten komut çalıştırıyor: $text" 'Tanımıyorsan Görev Zamanlayıcı / Görev Yöneticisi > Başlangıç''tan devre dışı bırak ve Defender ile tara.'
+    }
+    return $findings
+}
+
 # ---------------------------------------------------------------- USB-C display (on demand)
 
 # Windows cannot report whether the USB-C port carries video until something is plugged in.
@@ -790,7 +939,7 @@ function Update-HomeAlerts {
     foreach ($alert in (Get-SystemAlerts)) { $alerts.Add($alert) }
     try { foreach ($alert in (Get-DisplayAlerts @([GameBoostDisplay]::GetMonitors()))) { $alerts.Add($alert) } } catch { }
     try { foreach ($alert in (Get-AudioAlerts @([GameBoostAudio]::GetDevices()))) { $alerts.Add($alert) } } catch { }
-    foreach ($alert in @($script:insightCache.NetworkAlerts) + @($script:insightCache.DeviceAlerts) + @($script:sessionAlerts) + @($script:trendAlerts) + @($script:auditAlerts)) {
+    foreach ($alert in @($script:insightCache.NetworkAlerts) + @($script:insightCache.DeviceAlerts) + @($script:sessionAlerts) + @($script:trendAlerts) + @($script:auditAlerts) + @($script:securityAlerts)) {
         if ($alert) { $alerts.Add($alert) }
     }
     Update-ReadinessLabel $alerts

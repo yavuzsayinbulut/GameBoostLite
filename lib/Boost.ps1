@@ -38,8 +38,17 @@ $script:options = [ordered]@{
     AutoBoost       = $false
     SmartNotices    = $true
     DownloadAutoStop = $true
+    DownloadAutoStart = $false
+    SaverEfficiency = $true
     SaverRefresh    = $true
     SaverBrightness = $true
+    SaverTurbo      = $false
+    SaverEnergy     = $false
+    SuperEfficiency = $true
+    SuperRefresh    = $true
+    SuperBrightness = $true
+    SuperTurbo      = $true
+    SuperEnergy     = $true
 }
 $script:boostMode = $null
 $script:autoBoostCandidate = $null

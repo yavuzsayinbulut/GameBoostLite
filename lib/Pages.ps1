@@ -178,7 +178,7 @@ function New-TrayIcon {
     $open.Add_Click({ Show-FromTray })
     $script:trayBoostItem.Add_Click({ Show-FromTray; Start-Boost })
     $script:trayNormalItem.Add_Click({ Restore-NormalMode 'Normal moda dönüldü.' -Manual })
-    $script:trayDownloadItem.Add_Click({ if ($script:download) { Stop-DownloadMode } else { Start-DownloadMode } })
+    $script:trayDownloadItem.Add_Click({ if ($script:download) { Stop-DownloadMode -Manual } else { Start-DownloadMode } })
     $script:traySaverItem.Add_Click({ if ($script:saver) { Stop-SaverMode } else { [void](Start-SaverMode 'normal') } })
     $restart.Add_Click({ Exit-GameBoost -Restart })
     $quit.Add_Click({ Exit-GameBoost })
@@ -188,7 +188,11 @@ function New-TrayIcon {
     $icon.ContextMenuStrip = $menu
     $icon.Add_MouseClick({ param($sender, $e) if ($e.Button -eq [Windows.Forms.MouseButtons]::Left) { Show-FromTray } })
     # A clicked notification opens the page it is about.
-    $icon.Add_BalloonTipClicked({ Show-FromTray; if ($script:noticeTarget) { Show-Page $script:noticeTarget } })
+    $icon.Add_BalloonTipClicked({
+        Show-FromTray
+        if ($script:noticeTarget -eq 'security') { Show-Page 'care'; Select-UiTab $script:careTabs 1 }
+        elseif ($script:noticeTarget) { Show-Page $script:noticeTarget }
+    })
     $script:trayIcon = $icon
     Update-TrayState
     $icon.Visible = $true
@@ -306,49 +310,62 @@ function Build-ModesPage {
     $page = New-Page 'modes' 'Modlar' 'İndirme ve tasarruf modları, akıllı bildirimler. Kapatınca her şey eski haline döner.' 0xE945 { param($Page) Update-ModesPage }
     [void](New-UiButton $page 'Yenile' 836 22 100 32 -OnClick { Update-ModesPage })
 
-    $download = New-UiCard $page 'İndirme modu' 28 88 440 360
+    $download = New-UiCard $page 'İndirme modu' 28 88 440 370
     $script:downloadStatus = New-UiLabel $download '' 18 44 404 22 -Font $script:fonts.BodyBold
-    $script:downloadLive = New-UiLabel $download '' 18 68 404 20 -Color $script:theme.SubText
-    [void](New-UiLabel $download 'Bilgisayar uyumaz (ekran kapanabilir) · Wi-Fi güç tasarrufu kapanır · Wi-Fi koparsa aynı ağa yeniden bağlanır · trafik durunca haber verir.' `
-        18 92 404 48 -Font $script:fonts.Small -Color $script:theme.SubText -Wrap)
-    [void](New-OptionToggle $download 'DownloadAutoStop' 'Trafik durunca modu kapat, uykuya izin ver' 18 140 404 `
-        'İndirme 2 dk boyunca durgun kalırsa mod kendiliğinden kapanır ve bilgisayar normal zamanında uyur.')
-    $script:downloadButton = New-UiButton $download 'İndirme modunu aç' 18 178 200 36 $script:theme.Accent {
-        if ($script:download) { Stop-DownloadMode } else { Start-DownloadMode }
+    $script:downloadLive = New-UiLabel $download '' 18 68 404 20 -Font $script:fonts.Small -Color $script:theme.SubText
+    $script:downloadVerdict = New-UiLabel $download '' 18 94 404 22 -Font $script:fonts.BodyBold
+    $script:downloadFixButton = New-UiButton $download 'Wi-Fi ayarlarını uygula' 262 90 160 28 $script:theme.Accent { Invoke-WifiFix } `
+        -Tip 'Yönetici izni ister; Wi-Fi birkaç saniye kopar. Steam kaldığı yerden sürer, tarayıcı indirmeleri yarıda kalabilir.'
+    $script:downloadFixButton.Visible = $false
+    $script:downloadVerdictDetail = New-UiLabel $download '' 18 118 404 34 -Font $script:fonts.Small -Color $script:theme.SubText -Wrap
+    $script:downloadItems = New-UiLabel $download '' 18 156 404 32 -Font $script:fonts.Small -Wrap
+    [void](New-OptionToggle $download 'DownloadAutoStart' 'İndirme / yükleme başlayınca otomatik aç' 18 188 404 `
+        'Steam / Epic indirmesi, 50 MB üstü tarayıcı indirmesi veya 2 dk yoğun trafik (↓ 30+ / ↑ 8+ Mbps) görülünce mod açılır ve bildirim gelir. Elle kapatırsan 30 dk tekrar açılmaz.')
+    [void](New-OptionToggle $download 'DownloadAutoStop' 'Bitince modu kapat, uykuya izin ver' 18 218 404 `
+        'Steam / Epic / tarayıcı indirmeleri bitince (görünmüyorsa trafik 2 dk durgun kalınca) mod kapanır ve bilgisayar normal zamanında uyur.')
+    $script:downloadButton = New-UiButton $download 'İndirme modunu aç' 18 254 200 34 $script:theme.Accent {
+        if ($script:download) { Stop-DownloadMode -Manual } else { Start-DownloadMode }
         Update-ModesPage
-    }
-    [void](New-UiButton $download 'Hız testi' 226 178 196 36 -OnClick { Show-Page 'network'; Start-SpeedTest } `
-        -Tip 'Ağ / Wi-Fi sayfasında indirme ve yükleme hızını ölçer.')
-    $script:downloadChecks = New-UiAlertView $download 16 224 410 124
+    } -Tip 'Bilgisayar uyumaz (ekran kapanabilir), Wi-Fi güç tasarrufu kapanır, Wi-Fi koparsa aynı ağa yeniden bağlanır; Steam, Epic ve tarayıcı indirmelerini izler.'
+    [void](New-UiButton $download 'Hız testi' 226 254 196 34 -OnClick { Show-Page 'network'; Start-SpeedTest } `
+        -Tip 'Ağ / Wi-Fi sayfasında indirme ve yükleme hızını ölçer; İndirme modu darboğazı bu sonuca göre belirler.')
+    $script:downloadChecks = New-UiAlertView $download 16 296 410 66
 
-    $saver = New-UiCard $page 'Tasarruf modu' 484 88 452 360
+    $saver = New-UiCard $page 'Tasarruf modu' 484 88 452 370
     $script:saverStatus = New-UiLabel $saver '' 18 44 416 22 -Font $script:fonts.BodyBold
     $script:saverBattery = New-UiLabel $saver '' 18 68 416 20 -Color $script:theme.SubText
-    $saverText = "Tasarruf: arka plan uygulamaları verimlilik modunda, dahili ekran 60 Hz, parlaklık en fazla %50.`r`n" +
-        'Süper: + parlaklık %30, pilde turbo kapalı, pilde Windows Enerji tasarrufu.'
-    $saverInfo = New-UiLabel $saver $saverText 18 92 416 64 -Font $script:fonts.Small -Color $script:theme.SubText -Wrap
-    $script:toolTip.SetToolTip($saverInfo, "$(Get-SaverDescription 'normal')`r`n`r`n$(Get-SaverDescription 'super')")
-    [void](New-OptionToggle $saver 'SaverRefresh' 'Dahili ekranı 60 Hz''e al' 18 158 416 'Mod kapanınca önceki Hz''e döner. Harici ekranlara dokunmaz.')
-    [void](New-OptionToggle $saver 'SaverBrightness' 'Parlaklığı düşür (Tasarruf %50, Süper %30)' 18 188 416 `
-        'Yalnızca daha parlaksa düşürür. Mod sırasında parlaklığı kendin değiştirirsen kapanınca senin ayarın kalır.')
-    $script:saverButton = New-UiButton $saver 'Tasarruf' 18 226 128 36 $script:theme.Accent { [void](Start-SaverMode 'normal'); Update-ModesPage }
-    $script:superButton = New-UiButton $saver 'Süper tasarruf' 154 226 140 36 $script:theme.Accent { [void](Start-SaverMode 'super'); Update-ModesPage }
-    $script:saverStopButton = New-UiButton $saver 'Kapat' 302 226 132 36 -OnClick { Stop-SaverMode; Update-ModesPage }
-    $script:saverApplied = New-UiLabel $saver '' 18 272 416 76 -Font $script:fonts.Small -Wrap
+    $script:saverTabs = New-UiTabs $saver 18 94 @('Tasarruf', 'Süper tasarruf') @(120, 150) ([Drawing.Rectangle]::new(18, 132, 416, 150))
+    [void](New-UiButton $saver 'Önerilene dön' 310 94 124 30 -OnClick { Reset-SaverTab } -Tip 'Bu sekmedeki adımları önerilen ayarlara döndürür.')
+    $script:saverToggles = @{}
+    for ($tab = 0; $tab -lt 2; $tab++) {
+        $prefix = if ($tab -eq 1) { 'Super' } else { 'Saver' }
+        $top = 0
+        foreach ($step in $script:saverDefaults[$prefix].Keys) {
+            $toggle = New-UiToggle $script:saverTabs.Panels[$tab] $step 0 $top 416 ([bool]$script:options["$prefix$step"]) $script:saverHelp[$step]
+            $toggle.Tag = "$prefix$step"
+            $toggle.Add_CheckedChanged({ Invoke-SaverToggle $this })
+            $script:saverToggles["$prefix$step"] = $toggle
+            $top += 30
+        }
+    }
+    $script:saverEffect = New-UiLabel $saver '' 18 284 416 34 -Font $script:fonts.Small -Color $script:theme.SubText -Wrap
+    $script:saverStartButton = New-UiButton $saver 'Tasarrufu başlat' 18 322 200 34 $script:theme.Accent { Start-SaverFromTab }
+    $script:saverStopButton = New-UiButton $saver 'Kapat' 226 322 208 34 -OnClick { Stop-SaverMode; Update-ModesPage }
+    $script:saverTabs.Changed = { param($Index) Update-SaverTab }
 
-    $notices = New-UiCard $page 'Akıllı bildirimler' 28 464 440 232
+    $notices = New-UiCard $page 'Akıllı bildirimler' 28 474 440 222
     [void](New-OptionToggle $notices 'SmartNotices' 'Bildirim gönder' 18 42 404 'Saatin yanındaki bildirimler; tıklayınca ilgili sayfa açılır.')
     $noticeInfo = New-UiLabel $notices 'Pil, RAM, yoran uygulama, disk, güncelleme, indirme. Oyunda, tam ekranda ve Odak açıkken gönderilmez.' `
-        18 74 404 36 -Font $script:fonts.Small -Color $script:theme.SubText -Wrap
+        18 74 404 34 -Font $script:fonts.Small -Color $script:theme.SubText -Wrap
     $script:toolTip.SetToolTip($noticeInfo, 'Her konunun kendi tekrar sınırı var; günde en fazla 8 sıradan bildirim. İndirme ve kritik pil bildirimleri sınırsızdır ama oyun sırasında yalnızca listeye yazılır.')
-    $script:noticeBox = New-UiTextBox $notices 16 116 410 104
+    $script:noticeBox = New-UiTextBox $notices 16 112 410 98
     $script:noticeBox.Font = $script:fonts.Small
     $script:noticeBox.BackColor = $script:theme.Card
     $script:noticeBox.ForeColor = $script:theme.SubText
 
-    $power = New-UiCard $page 'Pil ve güç' 484 464 452 232
-    $script:powerChecks = New-UiAlertView $power 16 44 420 138
-    $script:gpuUsersButton = New-UiButton $power 'NVIDIA kartını kim uyandırıyor? (5 sn)' 16 188 300 32 -OnClick {
+    $power = New-UiCard $page 'Pil ve güç' 484 474 452 222
+    $script:powerChecks = New-UiAlertView $power 16 44 420 128
+    $script:gpuUsersButton = New-UiButton $power 'NVIDIA kartını kim uyandırıyor? (5 sn)' 16 178 300 32 -OnClick {
         $script:gpuUsersButton.Enabled = $false
         $script:gpuUsersButton.Text = 'Bakılıyor...'
         Start-GpuUsersScan {
@@ -359,15 +376,70 @@ function Build-ModesPage {
     } -Tip 'Ayrı ekran kartında bellek tutan uygulamaları bulur; kart uyanıkken pil birkaç watt daha hızlı biter.'
 }
 
+function Get-SaverTabLevel { if ($script:saverTabs.Index -eq 1) { return 'super' } return 'normal' }
+
+function Invoke-SaverToggle {
+    param($Toggle)
+    if ($script:revertingToggle) { return }
+    Invoke-OptionToggle $Toggle
+    $level = if (([string]$Toggle.Tag).StartsWith('Super')) { 'super' } else { 'normal' }
+    # The running mode follows its switches at once.
+    if ($script:saver -and $script:saver.Level -eq $level) { [void](Start-SaverMode $level) }
+    Update-ModesUi
+}
+
+function Reset-SaverTab {
+    $level = Get-SaverTabLevel
+    Reset-SaverOptions $level
+    $script:revertingToggle = $true
+    try { foreach ($item in (Get-SaverItems $level)) { $script:saverToggles[$item.Key].Checked = [bool]$script:options[$item.Key] } }
+    finally { $script:revertingToggle = $false }
+    if ($script:saver -and $script:saver.Level -eq $level) { [void](Start-SaverMode $level) }
+    Add-Log "$(if ($level -eq 'super') { 'Süper tasarruf' } else { 'Tasarruf' }) önerilen ayarlara döndü."
+    Update-SaverTab
+    Update-ModesUi
+}
+
+function Start-SaverFromTab {
+    [void](Start-SaverMode (Get-SaverTabLevel))
+    Update-ModesPage
+}
+
+# Switch texts show this PC's values ("144 → 60 Hz"); read when the page opens or the tab changes.
+function Update-SaverTab {
+    if (-not $script:saverTabs) { return }
+    $level = Get-SaverTabLevel
+    foreach ($item in (Get-SaverItems $level)) {
+        $toggle = $script:saverToggles[$item.Key]
+        $toggle.Text = if ($item.Recommended) { $item.Text } else { "$($item.Text)  (isteğe bağlı)" }
+        $toggle.Invalidate()
+    }
+    $script:saverEffect.Text = Get-SaverEffect $level
+    Update-SaverButtons
+}
+
+function Update-SaverButtons {
+    if (-not $script:saverStartButton) { return }
+    $level = Get-SaverTabLevel
+    $name = if ($level -eq 'super') { 'Süper tasarrufu' } else { 'Tasarrufu' }
+    $script:saverStartButton.Text = if ($script:saver -and $script:saver.Level -eq $level) { 'Yeniden uygula' }
+        elseif ($script:saver) { "$name geç" } else { "$name başlat" }
+    $script:saverStartButton.Enabled = -not $script:boosted
+    $script:saverStopButton.Enabled = [bool]$script:saver
+}
+
 # Checks need CIM, netsh and WinRT: read when the page opens or on Yenile, not every tick.
 function Update-ModesPage {
     if (-not $script:downloadChecks) { return }
     Invoke-UiBusy {
         Set-UiAlerts $script:downloadChecks (Get-DownloadChecks)
         Set-UiAlerts $script:powerChecks (Get-PowerChecks)
+        $script:pendingDownloads = if ($script:download) { @() } else { @(Get-ActiveDownloads) }
+        if ($script:saver) { Select-UiTab $script:saverTabs $(if ($script:saver.Level -eq 'super') { 1 } else { 0 }) } else { Update-SaverTab }
     }
     Update-ModesUi
     Update-NoticeList
+    Set-ModesInterval $true
 }
 
 # Buttons, sidebar and tray follow the modes.
@@ -380,42 +452,63 @@ function Update-ModesUi {
     Update-TrayState
     if (-not $script:downloadButton) { return }
     $script:downloadButton.Text = if ($script:download) { 'İndirme modunu kapat' } else { 'İndirme modunu aç' }
-    $script:saverButton.Enabled = -not $script:boosted -and -not ($script:saver -and $script:saver.Level -eq 'normal')
-    $script:superButton.Enabled = -not $script:boosted -and -not ($script:saver -and $script:saver.Level -eq 'super')
-    $script:saverStopButton.Enabled = [bool]$script:saver
-    $script:saverApplied.Text = if ($script:saver) {
-        "Uygulanan: $(if ($script:saver.Applied.Count) { $script:saver.Applied -join ' · ' } else { 'ekran ve güç ayarları zaten tasarruflu' })" +
-            " · verimlilik modunda $($script:saver.Efficiency.Count) süreç. Kapat ile hepsi eski haline döner."
-    } elseif ($script:boosted) { 'BOOST açıkken tasarruf modu başlatılmaz; oyun bitince kullanabilirsin.' }
-    else { 'Öne aldığın uygulama hemen normal hızına döner. Oyun başlarsa (BOOST) tasarruf kendiliğinden kapanır.' }
-    $script:saverApplied.ForeColor = if ($script:saver) { $script:theme.Text } else { $script:theme.SubText }
+    Update-SaverButtons
     Update-ModesLive
 }
 
 function Update-ModesLive {
     if (-not $script:downloadStatus) { return }
     $now = Get-ModesNow
-    if ($script:download) {
-        $minutes = [math]::Floor(($now - $script:download.Started).TotalMinutes)
-        $script:downloadStatus.Text = "Açık · $minutes dk · bilgisayar uyumuyor"
+    $mode = $script:download
+    if ($mode) {
+        $plan = $script:lastSpeedResult
+        $planText = if ($script:planTest) { 'paket hızı ölçülüyor...' } elseif ($plan) { 'paket ↓ {0} / ↑ {1}' -f (Format-Mbps $plan.Down), (Format-Mbps $plan.Up) } else { 'bilgisayar uyumuyor' }
+        $script:downloadStatus.Text = "Açık · $([math]::Floor(($now - $mode.Started).TotalMinutes)) dk · $planText"
         $script:downloadStatus.ForeColor = $script:theme.Accent
-        $script:downloadLive.Text = '↓ {0} · ↑ {1} · en yüksek ↓ {2} · toplam ↓ {3}' -f (Format-Mbps $script:download.RateDown), (Format-Mbps $script:download.RateUp),
-            (Format-Mbps $script:download.PeakDown), (Format-ByteSize $script:download.Received)
-        if ($script:download.WifiDownSince) { $script:downloadLive.Text = "Wi-Fi koptu; yeniden bağlanılıyor ($($script:download.ReconnectTries)/3)" }
+        if ($plan) { $script:toolTip.SetToolTip($script:downloadStatus, ('Paket hızı {0:dd.MM HH:mm} hız testinden: ↓ {1} · ↑ {2}' -f $plan.At, (Format-Speed $plan.Down), (Format-Speed $plan.Up))) }
+        $usage = if ($plan -and $plan.Down -gt 0 -and $mode.RateDown -ge 1) { ' (kullanım %{0})' -f [math]::Min(100, [math]::Round(100 * $mode.RateDown / $plan.Down)) } else { '' }
+        $script:downloadLive.Text = if ($mode.WifiDownSince) { "Wi-Fi koptu; yeniden bağlanılıyor ($($mode.ReconnectTries)/3)" }
+            else { '↓ {0}{1} · ↑ {2} · toplam {3}' -f (Format-Speed $mode.RateDown), $usage, (Format-Mbps $mode.RateUp), (Format-ByteSize $mode.Received) }
+        $script:toolTip.SetToolTip($script:downloadLive, "En yüksek ↓ $(Format-Speed $mode.PeakDown) · toplam ↑ $(Format-ByteSize $mode.Sent)")
+        $verdict = Get-DownloadVerdict
+        $script:downloadVerdict.Text = $verdict.Title
+        $script:downloadVerdict.ForeColor = switch ($verdict.Severity) { 'ok' { $script:theme.Accent } 'warning' { $script:theme.Amber } default { $script:theme.Blue } }
+        $script:downloadVerdictDetail.Text = $verdict.Detail
+        $fix = $verdict.Action -eq 'wifi-fix'
+        $script:downloadFixButton.Visible = $fix
+        $script:downloadVerdict.Width = if ($fix) { 236 } else { 404 }
+        $items = @($mode.Tracked.Values)
+        $script:downloadItems.Text = if ($items.Count -gt 0) {
+            (@($items | Select-Object -First 2 | ForEach-Object { Format-TrackedDownload $_ $mode.RateDown }) + @(if ($items.Count -gt 2) { "+$($items.Count - 2) indirme daha" })) -join "`r`n"
+        } elseif ($mode.Completed.Count -gt 0) { "Tamamlanan: $($mode.Completed -join ', ')" }
+        else { 'Steam, Epic veya tarayıcı indirmesi görünmüyor; bitiş trafikten anlaşılır.' }
+        $script:downloadItems.ForeColor = if ($items.Count -gt 0 -or $mode.Completed.Count -gt 0) { $script:theme.Text } else { $script:theme.Muted }
+        $script:toolTip.SetToolTip($script:downloadItems, $(if ($mode.Connections) { "Açık bağlantısı en çok olanlar (indiren olabilir): $($mode.Connections)" } else { '' }))
+        if ($mode.AutoReason) { $script:toolTip.SetToolTip($script:downloadVerdict, "Otomatik açıldı: $($mode.AutoReason)") }
     } else {
         $script:downloadStatus.Text = 'Kapalı'
         $script:downloadStatus.ForeColor = $script:theme.SubText
         $script:downloadLive.Text = if ($script:lastSpeedResult) {
-            'Son hız testi: ↓ {0} · ↑ {1} · {2:HH:mm}' -f (Format-Mbps $script:lastSpeedResult.Down), (Format-Mbps $script:lastSpeedResult.Up), $script:lastSpeedResult.At
-        } else { 'Büyük indirme veya yükleme başlatmadan önce aç.' }
+            'Son hız testi: ↓ {0} · ↑ {1} · {2:dd.MM HH:mm}' -f (Format-Speed $script:lastSpeedResult.Down), (Format-Mbps $script:lastSpeedResult.Up), $script:lastSpeedResult.At
+        } else { 'Hız testi yapılmadı; darboğaz kararı için bir kez ölç.' }
+        $pending = @($script:pendingDownloads)
+        $script:downloadVerdict.Text = if ($pending.Count -gt 0) { 'İndirme sürüyor: modu aç' } else { 'Büyük indirmeden önce aç' }
+        $script:downloadVerdict.ForeColor = if ($pending.Count -gt 0) { $script:theme.Amber } else { $script:theme.SubText }
+        $script:downloadVerdict.Width = 404
+        $script:downloadFixButton.Visible = $false
+        $script:downloadVerdictDetail.Text = 'Açıkken neyin sınırladığını (internet paketi, Wi-Fi, yükleme hattı, kaynak) canlı söyler; bitişi Steam, Epic ve tarayıcıdan anlar.'
+        $script:downloadItems.Text = if ($pending.Count -gt 0) { (@($pending | Select-Object -First 2 | ForEach-Object { Format-TrackedDownload $_ 0 })) -join "`r`n" } else { '' }
+        $script:downloadItems.ForeColor = $script:theme.Text
     }
     if ($script:saver) {
         $name = if ($script:saver.Level -eq 'super') { 'Süper tasarruf' } else { 'Tasarruf' }
-        $script:saverStatus.Text = "$name açık · $([math]::Floor(($now - $script:saver.Started).TotalMinutes)) dk"
+        $script:saverStatus.Text = "$name açık · $([math]::Floor(($now - $script:saver.Started).TotalMinutes)) dk · $($script:saver.Efficiency.Count) süreç verimlilik modunda"
         $script:saverStatus.ForeColor = $script:theme.Accent
+        $script:toolTip.SetToolTip($script:saverStatus, "Uygulanan: $($script:saver.Applied -join ', ')")
     } else {
-        $script:saverStatus.Text = 'Kapalı'
+        $script:saverStatus.Text = if ($script:boosted) { 'Kapalı · BOOST açıkken başlatılmaz' } else { 'Kapalı' }
         $script:saverStatus.ForeColor = $script:theme.SubText
+        $script:toolTip.SetToolTip($script:saverStatus, '')
     }
     $power = [Windows.Forms.SystemInformation]::PowerStatus
     if ($power.PowerLineStatus -eq [Windows.Forms.PowerLineStatus]::Offline) {
@@ -1049,6 +1142,15 @@ function Format-Mbps {
     return '{0:0.#} Mbps' -f $Mbps
 }
 
+# "245 Mbps · 30,6 MB/sn": Steam and browsers show download speed in megabytes per second.
+function Format-Speed {
+    param([double]$Mbps)
+    if ($Mbps -lt 0) { return 'ölçülemedi' }
+    $bytes = $Mbps / 8
+    $megabytes = if ($bytes -ge 10) { '{0:0} MB/sn' -f $bytes } elseif ($bytes -ge 1) { '{0:0.0} MB/sn' -f $bytes } else { '{0:0.00} MB/sn' -f $bytes }
+    return "$(Format-Mbps $Mbps) · $megabytes"
+}
+
 # Pressing again while it runs stops it.
 function Start-SpeedTest {
     if ($script:speedTest) { $script:speedTest.Cancel(); return }
@@ -1074,10 +1176,10 @@ function Start-SpeedTest {
         $test = $script:speedTest
         if (-not $test) { return }
         switch ($test.Phase) {
-            'down' { Set-UiValue $script:pingValues 'İndirme' "$(Format-Mbps $test.LiveMbps) ölçülüyor..." $script:theme.SubText; $script:pingVerdict.Text = 'İndirme ölçülüyor (~8 sn)...' }
-            'up' { Set-UiValue $script:pingValues 'Yükleme' "$(Format-Mbps $test.LiveMbps) ölçülüyor..." $script:theme.SubText; $script:pingVerdict.Text = 'Yükleme ölçülüyor (~6 sn)...' }
+            'down' { Set-UiValue $script:pingValues 'İndirme' "$(Format-Speed $test.LiveMbps) ölçülüyor..." $script:theme.SubText; $script:pingVerdict.Text = 'İndirme ölçülüyor (~8 sn)...' }
+            'up' { Set-UiValue $script:pingValues 'Yükleme' "$(Format-Speed $test.LiveMbps) ölçülüyor..." $script:theme.SubText; $script:pingVerdict.Text = 'Yükleme ölçülüyor (~6 sn)...' }
         }
-        if ($test.Phase -eq 'up' -and $test.DownMbps -ge 0) { Set-UiValue $script:pingValues 'İndirme' (Format-Mbps $test.DownMbps) }
+        if ($test.Phase -eq 'up' -and $test.DownMbps -ge 0) { Set-UiValue $script:pingValues 'İndirme' (Format-Speed $test.DownMbps) }
     })
     $script:speedTimer.Start()
     Wait-UiJob $test { param($Job) Complete-SpeedTest $Job }
@@ -1090,15 +1192,19 @@ function Complete-SpeedTest {
     $script:speedButton.Text = 'Hız testi'
     $used = Format-ByteSize $Test.BytesUsed
     if ($Test.Error -and $Test.DownMbps -lt 0) {
-        $script:pingVerdict.Text = if ($Test.Error -eq 'cancelled') { "Test durduruldu ($used veri)." } else { "Test tamamlanamadı: $($Test.Error)" }
+        $script:pingVerdict.Text = switch ($Test.Error) {
+            'cancelled' { "Test durduruldu ($used veri)." }
+            'rate-limited' { "İndirme ölçülemedi: Cloudflare şu an istekleri sınırlıyor (çok sık test). Birkaç dakika sonra tekrar dene.$(if ($Test.UpMbps -gt 0) { " Yükleme: $(Format-Speed $Test.UpMbps)." })" }
+            default { "Test tamamlanamadı: $($Test.Error)" }
+        }
         $script:pingVerdict.ForeColor = $script:theme.Amber
         Set-UiValue $script:pingValues 'İndirme' '—'
         Set-UiValue $script:pingValues 'Yükleme' '—'
         return
     }
     $down = $Test.DownMbps; $up = $Test.UpMbps
-    Set-UiValue $script:pingValues 'İndirme' (Format-Mbps $down) $script:theme.Accent
-    Set-UiValue $script:pingValues 'Yükleme' (Format-Mbps $up) $(if ($up -ge 0 -and $up -lt 5) { $script:theme.Amber } else { $script:theme.Accent })
+    Set-UiValue $script:pingValues 'İndirme' (Format-Speed $down) $script:theme.Accent
+    Set-UiValue $script:pingValues 'Yükleme' (Format-Speed $up) $(if ($up -ge 0 -and $up -lt 5) { $script:theme.Amber } else { $script:theme.Accent })
     $lines = [Collections.Generic.List[string]]::new()
     $server = if ($Test.Server) { "Cloudflare $($Test.Server)" } else { 'Cloudflare' }
     $lines.Add(('Sunucu: {0} · gecikme {1:0} ms (dalgalanma {2:0.#} ms) · {3} veri' -f $server, $Test.PingMs, $Test.JitterMs, $used))
@@ -1112,10 +1218,11 @@ function Complete-SpeedTest {
         $lines.Add("50 GB'lık oyun ≈ $time.$limit")
     }
     if ($up -ge 0 -and $up -lt 5) { $lines.Add('Yükleme düşük: canlı yayın ve büyük dosya yüklemeleri zorlanır.') }
+    if ($Test.Limited) { $lines.Add('Cloudflare istekleri bir süre sınırladı; sonuç biraz düşük çıkmış olabilir.') }
     $script:pingVerdict.Text = $lines -join ' '
     $script:pingVerdict.ForeColor = $script:theme.Text
-    $script:lastSpeedResult = [pscustomobject]@{ At = Get-Date; Down = $down; Up = $up; Ping = $Test.PingMs }
-    Add-Log "Hız testi: ↓ $(Format-Mbps $down) · ↑ $(Format-Mbps $up) · gecikme $([math]::Round($Test.PingMs)) ms ($server, $used)."
+    Save-SpeedResult ([pscustomobject]@{ At = Get-Date; Down = $down; Up = $up; Ping = $Test.PingMs })
+    Add-Log "Hız testi: ↓ $(Format-Speed $down) · ↑ $(Format-Speed $up) · gecikme $([math]::Round($Test.PingMs)) ms ($server, $used)."
 }
 
 function Get-PendingWifiValues {
@@ -1398,15 +1505,19 @@ function Build-ScorePage {
         $top += 54
     }
 
-    $setup = New-UiCard $page 'Kurulum puanı' 484 88 452 248
-    $script:setupScore = New-UiLabel $setup '—' 12 34 -Font $script:fonts.Score
-    $script:setupScoreMax = New-UiLabel $setup '/100' 96 74 -Color $script:theme.SubText
-    $script:setupSummary = New-UiLabel $setup '' 150 40 284 24 -Font $script:fonts.CardTitle
-    [void](New-UiLabel $setup 'Donanım değiştirmeden düzeltilebilenler. Önemli uyarı −20, uyarı −10 puan.' 150 66 284 40 `
-        -Font $script:fonts.Small -Color $script:theme.SubText -Wrap)
-    $script:setupAlerts = New-UiAlertView $setup 16 112 420 126
+    # Right column: game estimate and setup score as tabs.
+    $right = New-UiCard $page '' 484 88 452 500
+    $script:scoreTabs = New-UiTabs $right 16 14 @('Oyuna göre tahmin', 'Kurulum puanı') @(176, 170) ([Drawing.Rectangle]::new(2, 52, 448, 444))
+    $game = $script:scoreTabs.Panels[0]
+    $setup = $script:scoreTabs.Panels[1]
 
-    $game = New-UiCard $page 'Oyuna göre tahmin · yayıncı gereksinimlerine göre' 484 352 452 236
+    $script:setupScore = New-UiLabel $setup '—' 8 0 -Font $script:fonts.Score
+    $script:setupScoreMax = New-UiLabel $setup '/100' 92 40 -Color $script:theme.SubText
+    $script:setupSummary = New-UiLabel $setup '' 146 6 290 24 -Font $script:fonts.CardTitle
+    [void](New-UiLabel $setup 'Donanım değiştirmeden düzeltilebilenler. Önemli uyarı −20, uyarı −10 puan.' 146 32 290 40 `
+        -Font $script:fonts.Small -Color $script:theme.SubText -Wrap)
+    $script:setupAlerts = New-UiAlertView $setup 12 82 424 352
+
     $script:gameCombo = [Windows.Forms.ComboBox]::new()
     $script:gameCombo.DropDownStyle = 'DropDownList'
     $script:gameCombo.FlatStyle = 'Flat'
@@ -1414,14 +1525,18 @@ function Build-ScorePage {
     $script:gameCombo.ForeColor = $script:theme.Text
     $script:gameCombo.Font = $script:fonts.Body
     $script:gameCombo.MaxDropDownItems = 16
-    $script:gameCombo.Location = [Drawing.Point]::new(18, 44)
-    $script:gameCombo.Size = [Drawing.Size]::new(416, 28)
+    $script:gameCombo.Location = [Drawing.Point]::new(14, 0)
+    $script:gameCombo.Size = [Drawing.Size]::new(420, 28)
     $script:gameCombo.Add_SelectedIndexChanged({ Update-GameEstimate })
     $game.Controls.Add($script:gameCombo)
-    $script:toolTip.SetToolTip($script:gameCombo, '✓ işaretliler bu bilgisayarda yüklü (Steam, Epic, Riot) veya daha önce oynandı.')
-    $script:gameVerdict = New-UiLabel $game '' 18 80 416 24 -Font $script:fonts.CardTitle
+    $script:toolTip.SetToolTip($script:gameCombo, '✓ işaretliler bu bilgisayarda yüklü (Steam, Epic, Riot) veya daha önce oynandı; sonra en yeniler.')
+    $script:gameVerdict = New-UiLabel $game '' 14 36 420 24 -Font $script:fonts.CardTitle
     $script:toolTip.SetToolTip($script:gameVerdict, 'Yayıncının 1080p en düşük / önerilen gereksinimlerine göre tahmin; FPS ölçümü değildir.')
-    $script:gameNotes = New-UiLabel $game '' 18 106 416 124 -Font $script:fonts.Small -Color $script:theme.SubText -Wrap
+    $script:gameNotes = New-UiLabel $game '' 14 62 420 120 -Font $script:fonts.Small -Color $script:theme.SubText -Wrap
+    [void](New-UiLabel $game 'Önerilen grafik ayarları' 14 188 420 20 -Font $script:fonts.BodyBold)
+    $script:gameAdvice = New-UiLabel $game '' 14 210 420 210 -Font $script:fonts.Small -Wrap
+    [void](New-UiLabel $game 'Yayıncı gereksinimlerine göre tahmin; FPS ölçümü değildir. Başlangıç noktası olarak kullan.' 14 422 420 20 `
+        -Font $script:fonts.Small -Color $script:theme.Muted)
 
     $upgrade = New-UiCard $page 'Yükseltirsen' 484 604 452 92
     $script:scoreWhatIf = New-UiLabel $upgrade '' 18 38 416 50 -Font $script:fonts.Small -Wrap
@@ -1445,6 +1560,8 @@ function Update-GameEstimate {
     $script:gameVerdict.ForeColor = switch ($estimate.Level) { 0 { $script:theme.Red } 1 { $script:theme.Red } 2 { $script:theme.Amber } 3 { $script:theme.Blue } default { $script:theme.Accent } }
     $script:gameNotes.Text = ($estimate.Notes | ForEach-Object { "• $_" }) -join "`r`n"
     $script:toolTip.SetToolTip($script:gameNotes, $script:gameNotes.Text)
+    $script:gameAdvice.Text = ($estimate.Advice | ForEach-Object { "• $_" }) -join "`r`n"
+    $script:toolTip.SetToolTip($script:gameAdvice, $script:gameAdvice.Text)
 }
 
 # Parts are read once (Yenile reads them again); screens and the setup checks are fresh on every visit.
@@ -1479,6 +1596,7 @@ function Update-ScorePage {
     $script:setupSummary.Text = if ($count -eq 0) { 'Her şey yerinde' } elseif ($count -eq 1) { 'Puanı düşüren 1 şey var' } else { "Puanı düşüren $count şey var" }
     $script:setupSummary.ForeColor = if ($count -eq 0) { $script:theme.Accent } else { $script:theme.Amber }
     Set-UiAlerts $script:setupAlerts $score.Setup.Items
+    $script:scoreTabs.Buttons[1].Text = "Kurulum puanı · $($score.Setup.Score)"
     $script:scoreWhatIf.Text = ($score.WhatIf -join "`r`n")
     $script:toolTip.SetToolTip($script:scoreOverall, $score.Scale)
     $script:toolTip.SetToolTip($script:scoreWhatIf, $script:scoreWhatIf.Text)
@@ -1495,9 +1613,17 @@ function Set-ScoreNumber {
 # ---------------------------------------------------------------- Akıllı Bakım
 
 function Build-CarePage {
-    $page = New-Page 'care' 'Akıllı Bakım' 'Tüm uyarılar tek yerde; güvenli temizlik ve depolama analizi.' 0xE90F { param($Page) Update-HomeAlerts }
-    $alerts = New-UiCard $page 'Akıllı uyarılar' 28 88 440 608
-    $script:maintenanceAlerts = New-UiAlertView $alerts 16 48 410 546
+    $page = New-Page 'care' 'Bakım ve Güvenlik' 'Tüm uyarılar, güvenlik analizi, güvenli temizlik ve depolama analizi.' 0xE90F { param($Page) Update-HomeAlerts }
+    $left = New-UiCard $page '' 28 88 440 608
+    $script:careTabs = New-UiTabs $left 16 14 @('Akıllı uyarılar', 'Güvenlik') @(150, 130) ([Drawing.Rectangle]::new(2, 52, 436, 552))
+    $script:maintenanceAlerts = New-UiAlertView $script:careTabs.Panels[0] 14 0 410 540
+    $security = $script:careTabs.Panels[1]
+    $script:securitySummary = New-UiLabel $security 'Henüz taranmadı' 14 0 410 22 -Font $script:fonts.BodyBold -Color $script:theme.SubText
+    [void](New-UiLabel $security 'İzlenme (uzaktan erişim, kamera / mikrofon, proxy), madencilik ve virüs şüphesi. Hiçbir şeyi kapatmaz; her bulgu için ne yapılacağını söyler.' `
+        14 24 410 36 -Font $script:fonts.Small -Color $script:theme.SubText -Wrap)
+    $script:securityButton = New-UiButton $security 'Güvenlik taraması (15 sn)' 14 64 200 32 $script:theme.Accent { Start-SecurityScan }
+    [void](New-UiButton $security 'Windows Güvenliği' 222 64 188 32 -OnClick { Start-Process 'windowsdefender:' } -Tip 'Tarama, koruma geçmişi ve çevrimdışı tarama buradan.')
+    $script:securityList = New-UiAlertView $security 14 104 410 436
 
     $care = New-UiCard $page 'Bakım' 484 88 452 608
     [void](New-UiLabel $care 'Tarama ve temizlik yalnızca düğmeye basınca çalışır. Silmeden önce ne silineceği gösterilir.' 18 44 416 36 `
@@ -1517,8 +1643,8 @@ Depolamayı analiz et: büyük klasörleri ve
 500 MB üstü dosyaları listeler; bir şey silmez.
 '@ -Mono
     $script:maintenanceBox.BackColor = $script:theme.Card
-    $script:auditButton = New-UiButton $care 'Arka plan denetimi (10 sn)' 16 480 420 34 $script:theme.Accent { Start-BackgroundAudit } `
-        -Tip 'PC''yi yoran veya arka planda tuhaf çalışan uygulamaları 10 saniye izleyip listeler. Hiçbir şeyi kapatmaz.'
+    $script:auditButton = New-UiButton $care 'Güvenlik ve arka plan taraması (15 sn)' 16 480 420 34 $script:theme.Accent { Start-SecurityScan } `
+        -Tip 'PC''yi yoran, arka planda tuhaf çalışan, izleyen veya madencilik yapan uygulamaları 10 saniye izleyip listeler. Hiçbir şeyi kapatmaz.'
     $script:maintenanceScanButton = New-UiButton $care 'Depolamayı analiz et' 16 522 206 34 -OnClick { Update-MaintenanceRecommendations }
     $script:maintenanceCleanButton = New-UiButton $care 'Güvenli temizle' 230 522 206 34 $script:theme.Accent { Invoke-SafeMaintenanceCleanup }
     [void](New-UiButton $care 'Geri Dönüşüm Kutusu' 16 562 206 32 -OnClick { Clear-UserRecycleBin })
@@ -1526,17 +1652,24 @@ Depolamayı analiz et: büyük klasörleri ve
 }
 
 $script:auditAlerts = @()
+$script:securityAlerts = @()
 
-# The scan runs in its own runspace so the window (and a running BOOST) never waits for it.
-function Start-BackgroundAudit {
+# Background audit (10 s of CPU / GPU use) and the security checks, in their own runspace so the
+# window (and a running BOOST) never waits for them.
+function Start-SecurityScan {
     if ($script:auditRunning) { return }
     $script:auditRunning = $true
-    $script:auditButton.Enabled = $false
-    $script:auditButton.Text = 'Denetleniyor (10 sn)...'
-    $script:maintenanceBox.Text = "ARKA PLAN DENETİMİ`r`n`r`n10 saniye boyunca işlemci, ekran kartı ve başlangıç kayıtları izleniyor.`r`nHiçbir şey kapatılmaz veya değiştirilmez."
+    foreach ($button in $script:auditButton, $script:securityButton) { $button.Enabled = $false; $button.Text = 'Taranıyor (~15 sn)...' }
+    $script:maintenanceBox.Text = "GÜVENLİK VE ARKA PLAN TARAMASI`r`n`r`n10 saniye boyunca işlemci, ekran kartı, bağlantılar ve başlangıç kayıtları izleniyor.`r`nHiçbir şey kapatılmaz veya değiştirilmez."
+    $script:securitySummary.Text = 'Taranıyor (~15 sn)...'
+    $script:securitySummary.ForeColor = $script:theme.SubText
     $ignore = @($script:protectedCloseNames) + @('powershell', 'conhost', 'dwm', 'explorer', 'audiodg')
+    $code = 'param([string[]]$IgnoreNames, [int]$Seconds)' + "`r`n" +
+        "function Invoke-BackgroundAuditScan {`r`n$(${function:Invoke-BackgroundAuditScan})`r`n}`r`n" +
+        "function Invoke-SecurityChecks {`r`n$(${function:Invoke-SecurityChecks})`r`n}`r`n" +
+        '[pscustomobject]@{ Audit = (Invoke-BackgroundAuditScan -IgnoreNames $IgnoreNames -Seconds $Seconds); Security = @(Invoke-SecurityChecks) }'
     $shell = [powershell]::Create()
-    [void]$shell.AddScript(${function:Invoke-BackgroundAuditScan}.ToString())
+    [void]$shell.AddScript($code)
     [void]$shell.AddParameter('IgnoreNames', [string[]]$ignore)
     [void]$shell.AddParameter('Seconds', 10)
     $job = [pscustomobject]@{ Shell = $shell; Handle = $shell.BeginInvoke() }
@@ -1544,13 +1677,48 @@ function Start-BackgroundAudit {
     Wait-UiJob $job {
         param($Job)
         $result = $null
-        try { $result = @($Job.Shell.EndInvoke($Job.Handle)) | Select-Object -First 1 } catch { }
+        try { $result = @($Job.Shell.EndInvoke($Job.Handle)) | Select-Object -Last 1 } catch { }
         $Job.Shell.Dispose()
         $script:auditRunning = $false
-        $script:auditButton.Enabled = $true
-        $script:auditButton.Text = 'Arka plan denetimi (10 sn)'
-        Show-BackgroundAudit $result
+        $script:auditButton.Text = 'Güvenlik ve arka plan taraması (15 sn)'
+        $script:securityButton.Text = 'Güvenlik taraması (15 sn)'
+        foreach ($button in $script:auditButton, $script:securityButton) { $button.Enabled = $true }
+        Show-BackgroundAudit $(if ($result) { $result.Audit })
+        Show-SecurityResult $(if ($result) { @($result.Security) } else { $null }) $(if ($result) { $result.Audit })
     }
+}
+
+function Show-SecurityResult {
+    param($Security, $Audit)
+    if ($null -eq $Security) {
+        $script:securitySummary.Text = 'Tarama tamamlanamadı; hiçbir şey değiştirilmedi.'
+        $script:securitySummary.ForeColor = $script:theme.Amber
+        return
+    }
+    $items = [Collections.Generic.List[object]]::new()
+    foreach ($finding in $Security) { if ($finding) { $items.Add($finding) } }
+    # The audit's findings about miners, proxyware and odd unsigned programs belong here too.
+    foreach ($finding in @($Audit.Findings | Where-Object { $_.Kind -in 'miner', 'miner-start', 'proxy', 'proxy-start', 'gpu', 'odd', 'start-odd' -and $_.Severity -ne 'info' })) {
+        $items.Add([pscustomobject]@{ Kind = $finding.Kind; Severity = $finding.Severity; Name = $finding.Name; Detail = $finding.Detail; Action = ''; Path = $finding.Path })
+    }
+    $alerts = @($items | ForEach-Object {
+        $detail = $_.Detail
+        if ($_.Action) { $detail = "$detail → $($_.Action)".TrimStart(' ', '→') }
+        if ($_.Path) { $detail = "$detail ($($_.Path))" }
+        New-Alert $_.Severity $_.Name $detail
+    })
+    $critical = @($alerts | Where-Object Severity -eq 'critical').Count
+    $warnings = @($alerts | Where-Object Severity -eq 'warning').Count
+    $time = (Get-Date).ToString('HH:mm')
+    $script:securitySummary.Text = if ($critical + $warnings -eq 0) { "Şüpheli bir şey bulunmadı · $time" } else { "$critical önemli, $warnings uyarı · $time" }
+    $script:securitySummary.ForeColor = if ($critical -gt 0) { $script:theme.Red } elseif ($warnings -gt 0) { $script:theme.Amber } else { $script:theme.Accent }
+    if ($critical + $warnings -eq 0) {
+        $alerts = @(New-Alert 'ok' 'Şüpheli bir şey bulunmadı' 'Uzaktan erişim aracı, madenci, şüpheli bağlantı, gizli başlangıç komutu veya koruma sorunu görülmedi.') + $alerts
+    }
+    Set-UiAlerts $script:securityList $alerts
+    $script:securityAlerts = @($Security | Where-Object { $_ -and $_.Severity -in 'critical', 'warning' } | ForEach-Object { New-Alert $_.Severity "Güvenlik: $($_.Name)" "$($_.Detail) $($_.Action)".Trim() })
+    Add-Log "Güvenlik taraması: $critical önemli, $warnings uyarı, $(@($alerts | Where-Object Severity -eq 'info').Count) bilgi."
+    Update-HomeAlerts
 }
 
 function Show-BackgroundAudit {

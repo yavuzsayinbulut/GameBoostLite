@@ -145,6 +145,41 @@ function New-UiTextBox {
     return $box
 }
 
+# Segmented tabs: one button per tab, the tab pages are panels in the same place.
+function New-UiTabs {
+    param($Parent, [int]$X, [int]$Y, [string[]]$Names, [int[]]$Widths, [Drawing.Rectangle]$Area)
+    $tabs = [pscustomobject]@{ Buttons = [Collections.Generic.List[object]]::new(); Panels = [Collections.Generic.List[object]]::new(); Index = 0; Changed = $null }
+    $left = $X
+    for ($i = 0; $i -lt $Names.Count; $i++) {
+        $button = New-UiButton $Parent $Names[$i] $left $Y $Widths[$i] 30
+        $button.Tag = [pscustomobject]@{ Tabs = $tabs; Index = $i }
+        $button.Add_Click({ Select-UiTab $this.Tag.Tabs $this.Tag.Index })
+        $tabs.Buttons.Add($button)
+        $panel = [Windows.Forms.Panel]::new()
+        $panel.BackColor = Get-UiSurfaceColor $Parent
+        $panel.Location = $Area.Location
+        $panel.Size = $Area.Size
+        $Parent.Controls.Add($panel)
+        $tabs.Panels.Add($panel)
+        $left += $Widths[$i] + 6
+    }
+    Select-UiTab $tabs 0
+    return $tabs
+}
+
+function Select-UiTab {
+    param($Tabs, [int]$Index)
+    $Tabs.Index = $Index
+    for ($i = 0; $i -lt $Tabs.Buttons.Count; $i++) {
+        $on = $i -eq $Index
+        $Tabs.Panels[$i].Visible = $on
+        $Tabs.Buttons[$i].AccentColor = if ($on) { $script:theme.Accent } else { $script:theme.Neutral }
+        $Tabs.Buttons[$i].TextColor = if ($on) { [Drawing.Color]::FromArgb(8, 28, 18) } else { [Drawing.Color]::White }
+        $Tabs.Buttons[$i].Invalidate()
+    }
+    if ($Tabs.Changed) { & $Tabs.Changed $Index }
+}
+
 function New-UiAlertView {
     param($Parent, [int]$X, [int]$Y, [int]$Width, [int]$Height)
     $view = [GameBoostAlertView]::new()

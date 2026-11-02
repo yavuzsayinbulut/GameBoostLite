@@ -46,7 +46,8 @@ Sistem Bilgisi   Tam donanım raporu ve "Kullanabileceğin özellikler".
                  bu sırada pencere kullanılabilir.
 PC Puanı         Oyun gücü puanı, parça puanları, kurulum puanı, oyuna göre
                  tahmin, yükseltme etkisi.
-Akıllı Bakım     Tüm uyarılar, depolama analizi, güvenli temizlik.
+Bakım ve         Akıllı uyarılar ve Güvenlik sekmeleri, depolama analizi,
+Güvenlik         güvenli temizlik.
 FPS / HUD        Oyun içi gösterge (F10 / Ctrl+F10).
 
 OTOMATİK (Oyun Modu > Otomatik; üçü de başlangıçta kapalı)
@@ -147,11 +148,15 @@ PC PUANI
   sayfa her açıldığında yeniden okunur.
 - Yükseltirsen: RAM/SSD gibi değiştirilebilen parçaların puana etkisi.
 - Model tabloda yoksa puan "tahmini" diye işaretlenir.
-- Oyuna göre tahmin: ~50 popüler oyunun yayıncı gereksinimleri (1080p en düşük
-  / önerilen, yaklaşık) bu PC'nin ekran kartı, video belleği, RAM ve diskiyle
-  karşılaştırılır: Çalışmaz / Zorlanır / Düşük / Orta / Yüksek / Çok yüksek.
-  Steam, Epic ve Riot'ta yüklü veya daha önce BOOST'la oynanan oyunlar ✓ ile
-  başta gelir; o oyunun son oturum ölçümleri de gösterilir. FPS ölçümü değildir.
+- Sağ sütun iki sekme: "Oyuna göre tahmin" ve "Kurulum puanı".
+- Oyuna göre tahmin: ~110 oyunun (2025'e kadar güncel ve popüler oyunlar)
+  yayıncı gereksinimleri (1080p en düşük / önerilen, yaklaşık) bu PC'nin ekran
+  kartı, video belleği, RAM ve diskiyle karşılaştırılır: Çalışmaz / Zorlanır /
+  Düşük / Orta / Yüksek / Çok yüksek. Steam, Epic ve Riot'ta yüklü veya daha
+  önce BOOST'la oynanan oyunlar ✓ ile başta, sonra en yeniler gelir; o oyunun
+  son oturum ölçümleri de gösterilir. FPS ölçümü değildir.
+- Önerilen grafik ayarları: ön ayar, doku (video belleğine göre), DLSS / FSR
+  modu, gölge, ışın izleme, FPS sınırı, Reflex ve oyuna özel ipuçları.
 
 MODLAR
 ------
@@ -159,13 +164,30 @@ Her değişiklik yapılmadan önce modes-state.json'a yazılır; mod kapanınca,
 uygulama kapanınca veya (çökmede) sonraki açılışta birebir geri alınır.
 - İndirme modu: bilgisayar uyumaz (ekran kapanabilir; kapak kapanırsa uyur),
   Wi-Fi güç tasarrufu kapanır, Wi-Fi koparsa aynı ağa 3 kez yeniden bağlanmayı
-  dener, anlık ↓/↑ hız. Trafik 2 dk durgun kalırsa bildirir ve (ayar açıksa)
-  modu kapatır. Ölçülü bağlantı, pil, kapak, TCP otomatik ayarı, VPN, Infatica
-  ve Wi-Fi uyarıları kartta gösterilir.
-- Tasarruf: arka planda işlemci kullanan uygulamalar verimlilik modunda
-  (öne aldığın hemen normale döner), dahili ekran 60 Hz, parlaklık en fazla %50.
-- Süper tasarruf: + parlaklık %30, pilde işlemci turbosu kapalı, pilde Windows
-  Enerji tasarrufu açık (güç planı değerleri; eski değerleri geri yazılır).
+  dener. Anlık ↓/↑ hız Mbps ve MB/sn olarak, paket kullanımı (%).
+  - Paket hızı: hat boştayken haftada en fazla bir kez kısa hız testiyle
+    ölçülür (~10 sn, ölçülü bağlantıda yapılmaz).
+  - Darboğaz kararı (son 30 sn): internet paketinin sınırında / Wi-Fi sınırlıyor
+    (gerekirse "Wi-Fi ayarlarını uygula") / yükleme hattı dolu / kaynak yavaş.
+    Paket hızını hiçbir uygulama artıramaz; mod yerel engelleri gösterir.
+  - Bitişi algılama: Steam (steamapps\downloading + appmanifest ilerlemesi),
+    Epic (yarım kurulum işareti), tarayıcı / torrent (.crdownload, .part...).
+    İlerleme, kalan süre; bitince adıyla bildirir ve (ayar açıksa) modu kapatır.
+    Takip edilemeyenlerde trafik 2 dk durgun kalınca. Steam hâlâ listeliyorsa
+    "ilerlemiyor" der, modu kapatmaz.
+  - "İndirme / yükleme başlayınca otomatik aç" (başlangıçta kapalı): Steam /
+    Epic, 50 MB üstü tarayıcı indirmesi veya 2 dk yoğun trafik görülünce açar ve
+    bildirir. Elle kapatırsan 30 dk tekrar açmaz.
+  - Kartta: ölçülü bağlantı, pil, kapak, Steam hız sınırı, TCP otomatik ayarı,
+    VPN, Infatica ve Wi-Fi uyarıları; en çok bağlantısı olan uygulamalar (ipucu).
+  - Sayfa öndeyken saniyede bir, arkadayken 5 sn'de bir güncellenir.
+- Tasarruf ve Süper tasarruf iki sekmedir; her adım ayrı açılıp kapanır ve
+  "şu an → modda" değeriyle yazar. "Önerilene dön" sekmeyi sıfırlar. Mod açıkken
+  bir adımı değiştirirsen hemen yeniden uygulanır.
+  - Tasarruf (önerilen): arka plan verimlilik modu, dahili ekran 60 Hz,
+    parlaklık en fazla %50. İsteğe bağlı: pilde turbo kapalı, Enerji tasarrufu.
+  - Süper (önerilen): hepsi; parlaklık en fazla %30.
+  - Güç planı değerleri yazılmadan önce kaydedilir ve birebir geri yazılır.
 - Mod sırasında parlaklığı kendin değiştirirsen kapanınca senin ayarın kalır.
 - BOOST (elle veya otomatik) başlarsa tasarruf modu önce kapanır.
 - Pil ve güç: çekiş (W) ve kalan süre, kapasite değişiminden ölçülür (Windows
@@ -176,7 +198,8 @@ AKILLI BİLDİRİMLER (Modlar > Akıllı bildirimler)
 ------------------------------------------------
 Pil %20 / %10, RAM doldu, arka planda 3 dk işlemciyi yoran uygulama, disk
 dolmak üzere, güncelleme yeniden başlatma bekliyor, Infatica, uzun süredir
-yeniden başlatılmadı, indirme durdu, Wi-Fi koptu / geri geldi. Saatin yanında
+yeniden başlatılmadı, güvenlik bulguları (önerisiyle), indirme modu açıldı /
+indirme tamamlandı / ilerlemiyor, Wi-Fi koptu / geri geldi. Saatin yanında
 çıkar; tıklayınca ilgili sayfa açılır. Oyunda, tam ekranda, Odak / Rahatsız
 etmeyin açıkken ve BOOST sırasında gösterilmez. Her konunun tekrar sınırı var,
 günde en fazla 8 sıradan bildirim. Hiçbir uygulamayı kapatmaz.
@@ -184,9 +207,28 @@ günde en fazla 8 sıradan bildirim. Hiçbir uygulamayı kapatmaz.
 HIZ TESTİ (Ağ / Wi-Fi)
 ----------------------
 Cloudflare'in açık hız testi sunucusuyla (speed.cloudflare.com): gecikme,
-4 bağlantıyla ~8 sn indirme ve ~6 sn yükleme. En fazla ~300 MB indirme, ~60 MB
-yükleme. Ölçülü bağlantıda, BOOST veya İndirme modu açıkken önce sorar.
-Sonuç: Wi-Fi mı yoksa internet paketi mi sınırlıyor, 50 GB oyun kaç dakikada iner.
+4 bağlantıyla ~8 sn indirme ve ~6 sn yükleme; sonuç Mbps ve MB/sn. En fazla
+~300 MB indirme, ~60 MB yükleme. Cloudflare 10 MB üstü tek indirmeleri
+sınırladığı için 4 MB parçalarla ister; yine sınırlarsa parçayı küçültür ve
+bunu sonuçta söyler. Ölçülü bağlantıda, BOOST veya İndirme modu açıkken önce
+sorar. Sonuç: Wi-Fi mı yoksa internet paketi mi sınırlıyor, 50 GB oyun kaç
+dakikada iner. Son geçerli sonuç İndirme modunun paket hızı olarak saklanır.
+
+GÜVENLİK (Bakım ve Güvenlik > Güvenlik)
+---------------------------------------
+"Güvenlik taraması (15 sn)" arka plan denetimiyle birlikte çalışır ve bulur:
+- İzlenme: uzaktan erişim araçları (AnyDesk, TeamViewer, RustDesk, VNC...),
+  bilinen truva atı adları, kamerayı / mikrofonu şu an veya son 24 saatte
+  kullanan uygulamalar (Windows'un gizlilik kaydından), proxy ayarı, Uzak
+  Masaüstü.
+- Madencilik: madenci adları, penceresiz ekran kartı kullanımı, madencilik
+  havuzlarının tipik portlarına bağlantılar.
+- Virüs şüphesi: antivirüs / gerçek zamanlı koruma / güvenlik duvarı kapalı,
+  Defender'ın bulduğu tehditler, güvenlik sitelerini engelleyen veya
+  yönlendiren hosts dosyası, gizli PowerShell / mshta komutu çalıştıran
+  başlangıç görevleri, tuhaf klasörden çalışan imzasız uygulamalar.
+Her bulgu ne yapılacağını söyler. 10 dakikada bir hafif kontrol (~50 ms) önemli
+bulgular için bildirim gönderir. Hiçbir şeyi kapatmaz, silmez veya değiştirmez.
 
 OYUNA HAZIRLIK VE OYUN GEÇMİŞİ
 ------------------------------

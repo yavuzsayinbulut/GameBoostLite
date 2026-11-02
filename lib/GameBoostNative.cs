@@ -1633,14 +1633,23 @@ public static class GameBoostConnections {
 
     public static Dictionary<int, int> CountByProcess() {
         var counts = new Dictionary<int, int>();
-        Read(2, 24, counts);
-        Read(23, 56, counts);
+        Read(2, 24, counts, null);
+        Read(23, 56, counts, null);
         return counts;
+    }
+
+    // { pid, remote port } of every open internet connection.
+    public static List<int[]> RemotePorts() {
+        var list = new List<int[]>();
+        Read(2, 24, null, list);
+        Read(23, 56, null, list);
+        return list;
     }
 
     // family 2 = IPv4 (row: state, local addr, local port, remote addr, remote port, pid),
     // 23 = IPv6 (row: local addr[16], scope, port, remote addr[16], scope, port, state, pid).
-    static void Read(int family, int rowSize, Dictionary<int, int> counts) {
+    // Ports are stored in network byte order in the low two bytes.
+    static void Read(int family, int rowSize, Dictionary<int, int> counts, List<int[]> ports) {
         int size = 0;
         GetExtendedTcpTable(IntPtr.Zero, ref size, false, family, 4, 0);
         if (size <= 0) return;
@@ -1650,23 +1659,31 @@ public static class GameBoostConnections {
             int entries = Marshal.ReadInt32(table);
             for (int i = 0; i < entries; i++) {
                 IntPtr row = IntPtr.Add(table, 4 + i * rowSize);
-                int state, pid;
+                int state, pid, portOffset;
                 bool loopback;
                 if (family == 2) {
                     state = Marshal.ReadInt32(row, 0);
                     loopback = Marshal.ReadByte(row, 12) == 127;
                     pid = Marshal.ReadInt32(row, 20);
+                    portOffset = 16;
                 } else {
                     state = Marshal.ReadInt32(row, 48);
                     pid = Marshal.ReadInt32(row, 52);
+                    portOffset = 44;
                     loopback = true;
                     for (int b = 0; b < 15; b++) if (Marshal.ReadByte(row, 24 + b) != 0) { loopback = false; break; }
                     if (loopback && Marshal.ReadByte(row, 39) != 1) loopback = false;
                 }
                 if (state != 5 || loopback || pid <= 4) continue;
-                int count;
-                counts.TryGetValue(pid, out count);
-                counts[pid] = count + 1;
+                if (counts != null) {
+                    int count;
+                    counts.TryGetValue(pid, out count);
+                    counts[pid] = count + 1;
+                }
+                if (ports != null) {
+                    int port = (Marshal.ReadByte(row, portOffset) << 8) | Marshal.ReadByte(row, portOffset + 1);
+                    ports.Add(new int[] { pid, port });
+                }
             }
         } finally { Marshal.FreeHGlobal(table); }
     }
@@ -1710,6 +1727,10 @@ public sealed class GameBoostSpeedTest {
     public double DownSeconds = 8, UpSeconds = 6;
     public long DownCapBytes = 300000000, UpCapBytes = 60000000;
     const int UploadChunk = 4000000;
+    // Cloudflare answers 429 (too many requests) to single downloads of 10 MB and more: ask in 4 MB pieces
+    // and halve the piece when it still says 429.
+    const int DownloadChunk = 4000000;
+    public volatile bool Limited;
 
     volatile bool done, cancel, stopPhase;
     public bool Done { get { return done; } }
@@ -1740,6 +1761,7 @@ public sealed class GameBoostSpeedTest {
             if (!cancel) { Phase = "down"; DownMbps = Transfer(true); }
             if (!cancel) { Phase = "up"; UpMbps = Transfer(false); }
             if (cancel && Error == null) Error = "cancelled";
+            else if (DownMbps < 0 && Limited && Error == null) Error = "rate-limited";
         } catch (Exception e) { Error = e.Message; }
         finally { AbortAll(); Phase = "done"; done = true; }
     }
@@ -1855,12 +1877,13 @@ public sealed class GameBoostSpeedTest {
 
     void Pump(bool download) {
         var buffer = new byte[65536];
-        int failures = 0;
-        while (!stopPhase && !cancel && failures < 3) {
+        int failures = 0, limits = 0;
+        int piece = DownloadChunk;
+        while (!stopPhase && !cancel && failures < 3 && limits < 8) {
             HttpWebRequest request = null;
             try {
                 if (download) {
-                    request = NewRequest("/__down?bytes=25000000", "GET");
+                    request = NewRequest("/__down?bytes=" + piece, "GET");
                     using (WebResponse response = request.GetResponse())
                     using (Stream stream = response.GetResponseStream()) {
                         int read;
@@ -1881,6 +1904,19 @@ public sealed class GameBoostSpeedTest {
                         }
                     }
                     if (!stopPhase) using (request.GetResponse()) { }
+                }
+            } catch (WebException e) {
+                if (stopPhase || cancel) return;
+                var http = e.Response as HttpWebResponse;
+                if (http != null && (int)http.StatusCode == 429) {
+                    // The server asks to slow down: wait a little and ask for less.
+                    Limited = true;
+                    limits++;
+                    piece = Math.Max(500000, piece / 2);
+                    Thread.Sleep(800);
+                } else {
+                    failures++;
+                    Thread.Sleep(200);
                 }
             } catch {
                 if (stopPhase || cancel) return;
