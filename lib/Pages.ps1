@@ -273,6 +273,13 @@ function Invoke-OptionToggle {
     param($Toggle)
     if ($script:revertingToggle) { return }
     $key = [string]$Toggle.Tag
+    if ($key -eq 'DownloadSleepAfter') {
+        $script:options[$key] = [bool]($Toggle.Checked -and $script:download)
+        if (-not $script:options[$key]) { Stop-SleepCountdown 'Otomatik uyku kapatıldı.' }
+        elseif ($script:download) { $script:download.Notified = $false; $script:download.DoneNotified = $false }
+        Update-ModesUi
+        return
+    }
     if ($key -eq 'AutoStart') {
         if (-not (Set-AutoStart $Toggle.Checked)) {
             Add-Log 'Windows başlangıç ayarı değiştirilemedi.'
@@ -312,7 +319,7 @@ function New-OptionToggle {
 }
 
 function Build-ModesPage {
-    $page = New-Page 'modes' 'Modlar' 'İndirme ve tasarruf modları, akıllı bildirimler. Kapatınca her şey eski haline döner.' 0xE945 { param($Page) Update-ModesPage }
+    $page = New-Page 'modes' 'Modlar' 'İndirme, tasarruf ve akıllı bildirimler. Geri alma başarısızsa yedek korunur; Yenile ile tekrar dene.' 0xE945 { param($Page) Update-ModesPage }
     [void](New-UiButton $page 'Yenile' 836 22 100 32 -OnClick { Update-ModesPage })
 
     $download = New-UiCard $page 'İndirme modu' 28 88 440 370
@@ -329,9 +336,9 @@ function Build-ModesPage {
     [void](New-OptionToggle $download 'DownloadAutoStart' 'İndirme / yükleme başlayınca otomatik aç' 18 186 404 `
         'Steam / Epic indirmesi, 50 MB üstü tarayıcı indirmesi veya 2 dk yoğun trafik (↓ 30+ / ↑ 8+ Mbps) görülünce mod açılır ve bildirim gelir. Oyun sırasında açılmaz. Elle kapatırsan 30 dk tekrar açılmaz.')
     [void](New-OptionToggle $download 'DownloadAutoStop' 'Bitince modu kapat, uykuya izin ver' 18 214 404 `
-        'Steam / Epic / tarayıcı indirmeleri bitince (görünmüyorsa trafik 2 dk durgun kalınca) mod kapanır ve bilgisayar normal zamanında uyur.')
-    [void](New-OptionToggle $download 'DownloadSleepAfter' 'Bitince bilgisayarı uyut (60 sn iptal süresi)' 18 242 404 `
-        'İndirme bitince 60 sn geri sayım başlar; fareyi oynatırsan, bir tuşa basarsan, oyun açılırsa veya yeni indirme başlarsa iptal olur. Tepsiden de iptal edilir.')
+        'Yalnızca takip edilen indirmelerin tamamlanması doğrulanınca ve trafik durgunken mod kapanır. Duraklama, kopma veya belirsizlikte açık kalır.')
+    $script:downloadSleepToggle = New-OptionToggle $download 'DownloadSleepAfter' 'Bu indirme bitince uyut (60 sn iptal)' 18 242 404 `
+        'Önce indirme modunu aç. Bu izin kaydedilmez. Doğrulanmış bitişte geri sayım başlar; ağ trafiği, kullanıcı girişi, oyun veya izleme kesintisi iptal eder.'
     $script:downloadButton = New-UiButton $download 'İndirme modunu aç' 18 278 200 32 $script:theme.Accent {
         if ($script:download) { Stop-DownloadMode -Manual } else { Start-DownloadMode }
         Update-ModesPage
@@ -440,6 +447,8 @@ function Update-SaverButtons {
 # Checks need CIM, netsh and WinRT: read when the page opens or on Yenile, not every tick.
 function Update-ModesPage {
     if (-not $script:downloadChecks) { return }
+    if ($script:runtimeRecoveryPending -and -not $script:boosted) { [void](Restore-StaleBoostState) }
+    if ($script:modeRecoveryPending -and -not $script:download -and -not $script:saver) { [void](Restore-StaleModes) }
     Invoke-UiBusy {
         Set-UiAlerts $script:downloadChecks (Get-DownloadChecks)
         Set-UiAlerts $script:powerChecks (Get-PowerChecks)
@@ -453,6 +462,12 @@ function Update-ModesPage {
 
 # Buttons, sidebar and tray follow the modes.
 function Update-ModesUi {
+    if ($script:downloadSleepToggle) {
+        $script:revertingToggle = $true
+        $script:downloadSleepToggle.Checked = [bool]$script:options.DownloadSleepAfter
+        $script:downloadSleepToggle.Enabled = [bool]$script:download
+        $script:revertingToggle = $false
+    }
     $modes = Get-ActiveModesText
     if ($script:sidebarFooter) {
         $script:sidebarFooter.Text = if ($modes) { "●  $modes açık" } else { 'v2.0 · değişiklikler geri alınır' }
@@ -472,10 +487,10 @@ function Update-ModesLive {
     $script:sleepCancelButton.Visible = [bool]$script:sleepCountdown
     if ($mode) {
         $plan = $script:lastSpeedResult
-        $planText = if ($script:planTest) { 'paket hızı ölçülüyor...' } elseif ($plan) { 'paket ↓ {0} / ↑ {1}' -f (Format-Mbps $plan.Down), (Format-Mbps $plan.Up) } else { 'bilgisayar uyumuyor' }
+        $planText = if ($script:planTest) { 'hız ölçülüyor...' } elseif ($plan) { 'son test ↓ {0} / ↑ {1}' -f (Format-Mbps $plan.Down), (Format-Mbps $plan.Up) } else { 'otomatik uyku engelleniyor' }
         $script:downloadStatus.Text = "Açık · $([math]::Floor(($now - $mode.Started).TotalMinutes)) dk · $planText"
         $script:downloadStatus.ForeColor = $script:theme.Accent
-        if ($plan) { $script:toolTip.SetToolTip($script:downloadStatus, ('Paket hızı {0:dd.MM HH:mm} hız testinden: ↓ {1} · ↑ {2}' -f $plan.At, (Format-Speed $plan.Down), (Format-Speed $plan.Up))) }
+        if ($plan) { $script:toolTip.SetToolTip($script:downloadStatus, ('Son test {0:dd.MM HH:mm}: ↓ {1} · ↑ {2}; abonelik hızı değildir.' -f $plan.At, (Format-Speed $plan.Down), (Format-Speed $plan.Up))) }
         $usage = if ($plan -and $plan.Down -gt 0 -and $mode.RateDown -ge 1) { ' (kullanım %{0})' -f [math]::Min(100, [math]::Round(100 * $mode.RateDown / $plan.Down)) } else { '' }
         $script:downloadLive.Text = if ($mode.WifiDownSince) { "Wi-Fi koptu; yeniden bağlanılıyor ($($mode.ReconnectTries)/3)" }
             else { '↓ {0}{1} · ↑ {2} · toplam {3}' -f (Format-Speed $mode.RateDown), $usage, (Format-Mbps $mode.RateUp), (Format-ByteSize $mode.Received) }
@@ -491,7 +506,8 @@ function Update-ModesLive {
         $script:downloadItems.Text = if ($items.Count -gt 0) {
             (@($items | Select-Object -First 2 | ForEach-Object { Format-TrackedDownload $_ $mode.RateDown }) + @(if ($items.Count -gt 2) { "+$($items.Count - 2) indirme daha" })) -join "`r`n"
         } elseif ($mode.Completed.Count -gt 0) { "Tamamlanan: $($mode.Completed -join ', ')" }
-        else { 'Steam, Epic veya tarayıcı indirmesi görünmüyor; bitiş trafikten anlaşılır.' }
+        elseif ($mode.Unresolved.Count -gt 0 -or -not $mode.TrackingOk) { 'Tamamlanma belirsiz; otomatik kapanma ve uyku engellendi.' }
+        else { 'Takip edilen indirme yok; trafik tek başına bitiş kanıtı değildir.' }
         $script:downloadItems.ForeColor = if ($items.Count -gt 0 -or $mode.Completed.Count -gt 0) { $script:theme.Text } else { $script:theme.Muted }
         $script:toolTip.SetToolTip($script:downloadItems, $(if ($mode.Connections) { "Açık bağlantısı en çok olanlar (indiren olabilir): $($mode.Connections)" } else { '' }))
         if ($mode.AutoReason) { $script:toolTip.SetToolTip($script:downloadVerdict, "Otomatik açıldı: $($mode.AutoReason)") }
@@ -511,9 +527,18 @@ function Update-ModesLive {
         $script:downloadVerdict.ForeColor = if ($pending.Count -gt 0) { $script:theme.Amber } else { $script:theme.SubText }
         $script:downloadVerdict.Width = 404
         $script:downloadFixButton.Visible = $false
-        $script:downloadVerdictDetail.Text = 'Açıkken neyin sınırladığını (internet paketi, Wi-Fi, yükleme hattı, kaynak) canlı söyler; bitişi Steam, Epic ve tarayıcıdan anlar.'
+        $script:downloadVerdictDetail.Text = 'Trafiği pasif izler, olası sınırları gösterir. Yalnızca doğrulanmış indirme bitişinde otomatik kapanır.'
         $script:downloadItems.Text = if ($pending.Count -gt 0) { (@($pending | Select-Object -First 2 | ForEach-Object { Format-TrackedDownload $_ 0 })) -join "`r`n" } else { '' }
         $script:downloadItems.ForeColor = $script:theme.Text
+    }
+    if ($script:sleepCountdown) {
+        $left = [math]::Max(0, [math]::Ceiling($script:sleepCountdown.Seconds - ($now - $script:sleepCountdown.Started).TotalSeconds))
+        $script:downloadStatus.Text = "Uyku: $left sn · giriş veya ağ trafiği iptal eder"
+        $script:downloadStatus.ForeColor = $script:theme.Amber
+        $script:downloadFixButton.Visible = $false
+        $script:downloadVerdict.Text = 'Takip edilen indirmeler tamamlandı'
+        $script:downloadVerdict.Width = 236
+        $script:downloadVerdictDetail.Text = 'Geri sayımda ağ trafiği, kullanıcı girişi veya izleme belirsizliği oluşursa uyku iptal edilir.'
     }
     if ($script:saver) {
         $name = if ($script:saver.Level -eq 'super') { 'Süper tasarruf' } else { 'Tasarruf' }
@@ -1628,7 +1653,7 @@ function Set-ScoreNumber {
 # ---------------------------------------------------------------- Akıllı Bakım
 
 function Build-CarePage {
-    $page = New-Page 'care' 'Bakım ve Güvenlik' 'Uyarılar, güvenlik, haftalık özet, tek tıklık çözümler, güvenli temizlik.' 0xE90F { param($Page) Update-HomeAlerts; Update-CareTab }
+    $page = New-Page 'care' 'Bakım ve Güvenlik' 'Uyarılar, güvenlik, haftalık özet, açıklamalı öneriler, güvenli temizlik.' 0xE90F { param($Page) Update-HomeAlerts; Update-CareTab }
     $left = New-UiCard $page '' 28 88 440 608
     $script:careTabs = New-UiTabs $left 14 14 @('Uyarılar', 'Güvenlik', 'Haftalık', 'Çözümler') @(98, 98, 98, 98) ([Drawing.Rectangle]::new(2, 52, 436, 552))
     $script:careTabs.Changed = { param($Index) Update-CareTab }
@@ -1641,7 +1666,7 @@ function Build-CarePage {
     [void](New-UiLabel $weekly 'Her hafta sessiz bir bildirimle de gelir.' 164 514 260 20 -Font $script:fonts.Small -Color $script:theme.Muted)
 
     $fixes = $script:careTabs.Panels[3]
-    [void](New-UiLabel $fixes 'Takılma nedenleri, pil, sürücü ve ısı için tek tıklık çözümler. Hiçbiri sen tıklamadan yapılmaz.' 14 0 410 36 `
+    [void](New-UiLabel $fixes 'Ölçülen durumlar, olası ilişkiler ve genel öneriler. Ayarlar yalnızca sen seçince değişir.' 14 0 410 36 `
         -Font $script:fonts.Small -Color $script:theme.SubText -Wrap)
     $script:fixesPanel = [Windows.Forms.Panel]::new()
     $script:fixesPanel.Location = [Drawing.Point]::new(14, 40)
@@ -1661,7 +1686,7 @@ function Build-CarePage {
     $care = New-UiCard $page 'Bakım' 484 88 452 608
     [void](New-UiLabel $care 'Tarama ve temizlik yalnızca düğmeye basınca çalışır. Silmeden önce ne silineceği gösterilir.' 18 44 416 36 `
         -Color $script:theme.SubText -Font $script:fonts.Small -Wrap)
-    $script:maintenanceBox = New-UiTextBox $care 16 88 422 380 @'
+    $script:maintenanceBox = New-UiTextBox $care 16 88 422 336 @'
 GÜVENLİ TEMİZLE neyi siler?
   • 24 saatten eski kullanıcı Temp dosyaları
   • 7 günden eski çökme dökümleri ve hata raporları
@@ -1672,10 +1697,16 @@ Neye dokunmaz?
   • Tarayıcı verileri, kişisel dosyalar
   • RAM (zorla boşaltmak oyunu yavaşlatır)
 
+SON KULLANILANLARI TEMİZLE: son açılan dosyalar,
+Çalıştır, Gezgin adres / arama ve Aç-Kaydet geçmişi.
+Dosyalar ve sabitlenmiş öğeler korunur.
+
 Depolamayı analiz et: büyük klasörleri ve
 500 MB üstü dosyaları listeler; bir şey silmez.
 '@ -Mono
     $script:maintenanceBox.BackColor = $script:theme.Card
+    [void](New-UiButton $care 'Son kullanılanları temizle' 16 434 420 34 -OnClick { Invoke-RecentItemsCleanup } `
+        -Tip 'Son açılan dosyalar, Çalıştır ve Dosya Gezgini geçmişi listeden kaldırılır. Önce ne silineceği gösterilir; dosyalara dokunulmaz.')
     $script:auditButton = New-UiButton $care 'Güvenlik ve arka plan taraması (15 sn)' 16 480 420 34 $script:theme.Accent { Start-SecurityScan } `
         -Tip 'PC''yi yoran, arka planda tuhaf çalışan, izleyen veya madencilik yapan uygulamaları 10 saniye izleyip listeler. Hiçbir şeyi kapatmaz.'
     $script:maintenanceScanButton = New-UiButton $care 'Depolamayı analiz et' 16 522 206 34 -OnClick { Update-MaintenanceRecommendations }

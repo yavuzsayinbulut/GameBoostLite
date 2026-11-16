@@ -17,6 +17,7 @@ $script:settingsDirectory = Join-Path $env:LOCALAPPDATA 'GameBoostLite'
 $script:settingsFile = Join-Path $script:settingsDirectory 'settings.json'
 $script:runtimeStateFile = Join-Path $script:settingsDirectory 'runtime-state.json'
 $script:staleBoostRestored = $false
+$script:runtimeRecoveryPending = $false
 $script:settingsLoaded = $false
 $script:recommendationsInitialized = $false
 $script:overlayPrompted = $true
@@ -76,6 +77,7 @@ $script:recommendedCloseNames = New-NameSet @(
 $script:excludedNames = New-NameSet @(
     'powershell', 'powershell_ise', 'steam', 'steamservice', 'steamwebhelper', 'GameOverlayUI',
     'EpicGamesLauncher', 'EpicWebHelper', 'EpicOnlineServicesUserHelper',
+    'EpicOnlineServicesInstallHelper', 'EpicOnlineServicesHost',
     'EOSOverlayRenderer-Win64-Shipping', 'EADesktop', 'EALauncher',
     'EABackgroundService', 'EALocalHostSvc', 'EACefSubProcess', 'UbisoftConnect',
     'upc', 'UplayWebCore', 'RockstarService', 'Launcher', 'SocialClubHelper',
@@ -98,6 +100,7 @@ $script:protectedCloseNames = New-NameSet @(
     'SgrmBroker', 'NVDisplay.Container', 'NVIDIA Share', 'PresentMon_x64', 'nvidia-smi',
     'OmenCap', 'OmenCommandCenterBackground', 'steam', 'steamservice', 'steamwebhelper',
     'GameOverlayUI', 'EpicGamesLauncher', 'EpicWebHelper', 'EpicOnlineServicesUserHelper',
+    'EpicOnlineServicesInstallHelper', 'EpicOnlineServicesHost',
     'EOSOverlayRenderer-Win64-Shipping', 'EADesktop', 'EALauncher', 'EABackgroundService',
     'EALocalHostSvc', 'EACefSubProcess', 'UbisoftConnect', 'upc', 'UplayWebCore',
     'RockstarService', 'Launcher', 'SocialClubHelper', 'EasyAntiCheat',
@@ -182,7 +185,7 @@ function Update-Metrics {
 
 function Save-RuntimeState {
     try {
-        New-Item -ItemType Directory -Path $script:settingsDirectory -Force | Out-Null
+        New-Item -ItemType Directory -Path $script:settingsDirectory -Force -ErrorAction Stop | Out-Null
         $efficiency = @($script:efficiencyTargets.Values | ForEach-Object {
             [ordered]@{ Id = $_.Id; CreateTime = [string]$_.CreateTime; Priority = $_.Priority; Control = $_.Control; State = $_.State }
         })
@@ -193,9 +196,10 @@ function Save-RuntimeState {
             PreviousPowerScheme = $script:previousPowerScheme
             Efficiency = $efficiency
             SavedAt = (Get-Date).ToString('o')
-        } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $temp -Encoding UTF8
-        Move-Item -LiteralPath $temp -Destination $script:runtimeStateFile -Force
-    } catch { }
+        } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $temp -Encoding UTF8 -ErrorAction Stop
+        Move-Item -LiteralPath $temp -Destination $script:runtimeStateFile -Force -ErrorAction Stop
+        return $true
+    } catch { Add-Log 'BOOST geri alma yedeği kaydedilemedi.'; return $false }
 }
 
 function Clear-RuntimeState {
@@ -219,20 +223,28 @@ function Clear-CurrentGameFile {
 function Restore-StaleBoostState {
     if (-not (Test-Path $script:runtimeStateFile)) { return $false }
     try {
-        $state = Get-Content -LiteralPath $script:runtimeStateFile -Raw | ConvertFrom-Json
-        if ($state.BoostActive -and $state.PreviousPowerScheme) { Set-PowerScheme ([string]$state.PreviousPowerScheme) }
+        $state = Get-Content -LiteralPath $script:runtimeStateFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if (-not $state -or $state.BoostActive -ne $true -or -not $state.SavedAt) { throw 'Invalid BOOST recovery record' }
+        $ok = Restore-BoostPowerScheme ([string]$state.PreviousPowerScheme)
         foreach ($item in @($state.Efficiency)) {
             if ($null -eq $item) { continue }
-            [void][GameBoostEngine]::TryRestoreEfficiency([int]$item.Id, [long]$item.CreateTime, [uint32]$item.Priority,
-                [uint32]$item.Control, [uint32]$item.State)
+            if (-not (Restore-ModeEfficiency $item)) { $ok = $false }
         }
-        Clear-RuntimeState
-        Clear-CurrentGameFile
-        return $true
-    } catch {
-        Clear-RuntimeState
-        return $false
-    }
+        if ($ok) { Clear-RuntimeState; Clear-CurrentGameFile; $script:runtimeRecoveryPending = $false; return $true }
+    } catch { }
+    $script:runtimeRecoveryPending = $true
+    Add-Log 'BOOST geri yüklemesi tamamlanmadı; yedek korundu. Modlar > Yenile ile tekrar dene.'
+    return $false
+}
+
+function Restore-BoostPowerScheme {
+    param([string]$Previous)
+    if (-not $Previous) { return $true }
+    $current = Get-ActivePowerScheme
+    if (-not $current) { return $false }
+    if ($current -eq $Previous -or $current -ne $script:highPerformanceGuid) { return $true }
+    Set-PowerScheme $Previous
+    return (Get-ActivePowerScheme) -eq $Previous
 }
 
 # Through the Oyun Ayarları backup, so "Hepsini eski haline döndür" puts the original value back.
@@ -351,6 +363,7 @@ function Load-CustomSettings {
         }
         # Earlier versions stored the options at the top level; read both.
         foreach ($key in @($script:options.Keys)) {
+            if ($key -eq 'DownloadSleepAfter') { $script:options[$key] = $false; continue }
             $value = if ($settings.Options -and $null -ne $settings.Options.$key) { $settings.Options.$key } else { $settings.$key }
             if ($null -ne $value) { $script:options[$key] = [bool]$value }
         }
@@ -371,13 +384,15 @@ function Save-CustomSettings {
     param([switch]$Quiet)
     try {
         New-Item -ItemType Directory -Path $script:settingsDirectory -Force | Out-Null
+        $persistedOptions = [ordered]@{}
+        foreach ($key in $script:options.Keys) { if ($key -ne 'DownloadSleepAfter') { $persistedOptions[$key] = $script:options[$key] } }
         [ordered]@{
             CustomCloseNames = @($script:customCloseNames | Sort-Object)
             RecommendationsInitialized = $script:recommendationsInitialized
             OverlayPrompted = $script:overlayPrompted
             OverlayEnabled = $script:overlayEnabled
             TrayHintShown = [bool]$script:trayHintShown
-            Options = $script:options
+            Options = $persistedOptions
         } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $script:settingsFile -Encoding UTF8
         if (-not $Quiet) { Add-Log "Kapatma listesi kaydedildi ($($script:customCloseNames.Count) uygulama)." }
     } catch { Add-Log 'Ayarlar kaydedilemedi.' }
@@ -534,14 +549,11 @@ function Detect-FullscreenGame {
 function Add-EfficiencyTarget {
     param($Process)
     if ($script:efficiencyTargets.ContainsKey($Process.Key)) { return $false }
-    $control = [uint32]0
-    $state = [uint32]0
-    $previous = [GameBoostEngine]::TryEnableEfficiency($Process.Id, $Process.CreateTime, [ref]$control, [ref]$state)
-    if ($previous -eq 0) { return $false }
-    $script:efficiencyTargets[$Process.Key] = [pscustomobject]@{
-        Id = $Process.Id; CreateTime = $Process.CreateTime; Priority = $previous; Name = $Process.Name
-        Control = $control; State = $state
-    }
+    $target = Get-EfficiencyBackup $Process
+    if (-not $target) { return $false }
+    $script:efficiencyTargets[$Process.Key] = $target
+    if (-not (Save-RuntimeState)) { $script:efficiencyTargets.Remove($Process.Key); return $false }
+    if (-not (Apply-EfficiencyBackup $target)) { $script:efficiencyTargets.Remove($Process.Key); [void](Save-RuntimeState); return $false }
     return $true
 }
 
@@ -551,12 +563,9 @@ function Restore-EfficiencyTargets {
     foreach ($key in @($script:efficiencyTargets.Keys)) {
         $target = $script:efficiencyTargets[$key]
         if ($Name -and $target.Name -ne $Name) { continue }
-        [void][GameBoostEngine]::TryRestoreEfficiency($target.Id, [long]$target.CreateTime, [uint32]$target.Priority,
-            [uint32]$target.Control, [uint32]$target.State)
-        $script:efficiencyTargets.Remove($key)
-        $restored++
+        if (Restore-ModeEfficiency $target) { $script:efficiencyTargets.Remove($key); $restored++ }
     }
-    if ($restored -gt 0 -and $script:boosted) { Save-RuntimeState }
+    if ($restored -gt 0 -and $script:boosted) { [void](Save-RuntimeState) }
     return $restored
 }
 
@@ -572,7 +581,7 @@ function Enable-BackgroundEfficiency {
     }
     if ($count -gt 0) {
         Add-Log "Verimlilik modu: $(@($names) -join ', ') ($count süreç)."
-        Save-RuntimeState
+        [void](Save-RuntimeState)
     }
 }
 
@@ -626,7 +635,7 @@ function Watch-BackgroundActivity {
             $strikes[$process.Key] = $count
             if ($count -ge 2 -and (Add-EfficiencyTarget $process)) {
                 Set-ActivityNotice "$($process.Name) arka planda CPU %$($process.CpuPercent) kullanıyordu; verimlilik moduna alındı."
-                Save-RuntimeState
+                [void](Save-RuntimeState)
                 continue
             }
         }
@@ -694,6 +703,45 @@ function Sync-AutoStartOption {
     if ($current -and $current -ne (Get-AutoStartCommand)) { [void](Set-AutoStart $true) }
 }
 
+# ---------------------------------------------------------------- shortcuts and taskbar icon
+
+# Same ID as GameBoostLite.ps1 gives its process: the taskbar then shows GameBoost (not
+# Windows PowerShell) and a pinned icon matches the running window.
+$script:appUserModelId = 'GameBoostLite.Main'
+
+function Get-AppIconPath { return (Join-Path $script:appRoot 'assets\gameboost-icon.ico') }
+
+# GameBoost's own shortcuts (desktop and its Start menu folder). Shortcuts made before the folder
+# moved still pointed at the old icon file, so Explorer showed a blank icon. Only shortcuts that
+# start a script from this folder are touched; a file is written only when something differs.
+function Repair-AppShortcuts {
+    $icon = Get-AppIconPath
+    if (-not (Test-Path -LiteralPath $icon)) { return 0 }
+    $mainScript = Join-Path $script:appRoot 'GameBoostLite.ps1'
+    $startFolder = Join-Path ([Environment]::GetFolderPath('Programs')) 'GameBoost Lite'
+    $paths = @(Join-Path ([Environment]::GetFolderPath('Desktop')) 'GameBoost Lite.lnk')
+    $paths += @(Get-ChildItem -LiteralPath $startFolder -Filter '*.lnk' -File -ErrorAction SilentlyContinue | ForEach-Object FullName)
+    $fixed = 0
+    foreach ($path in $paths) {
+        if (-not (Test-Path -LiteralPath $path)) { continue }
+        $link = [GameBoostShell]::ReadShortcut($path)
+        if (-not $link -or $link[1].IndexOf($script:appRoot, [StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
+        $isMain = $link[1].IndexOf($mainScript, [StringComparison]::OrdinalIgnoreCase) -ge 0
+        $newIcon = if ($link[3] -ne $icon) { $icon } else { $null }
+        $newId = if ($isMain -and $link[4] -ne $script:appUserModelId) { $script:appUserModelId } else { $null }
+        if (-not $newIcon -and -not $newId) { continue }
+        if ([GameBoostShell]::WriteShortcut($path, $null, $null, $null, $newIcon, $null, $newId)) { $fixed++ }
+    }
+    # The Start menu entry is what Windows looks up for the taskbar name and icon.
+    $startLink = Join-Path $startFolder 'GameBoost Lite.lnk'
+    if ((Test-Path -LiteralPath $startFolder) -and -not (Test-Path -LiteralPath $startLink)) {
+        $arguments = "--headless powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File `"$mainScript`""
+        if ([GameBoostShell]::WriteShortcut($startLink, "$env:SystemRoot\System32\conhost.exe", $arguments, $script:appRoot,
+                $icon, 'GameBoost Lite: oyun performans merkezi', $script:appUserModelId)) { $fixed++ }
+    }
+    return $fixed
+}
+
 # ---------------------------------------------------------------- automatic BOOST
 
 function Test-OnBattery {
@@ -741,12 +789,14 @@ function Start-AutoBoost {
     param($Game, $Snapshot)
     if ($script:boosted) { return }
     Stop-SaverForBoost
+    if ($script:saver -or $script:modeRecoveryPending -or $script:runtimeRecoveryPending) { return }
     $script:boostMode = 'auto'
     $onBattery = Test-OnBattery
     $script:previousPowerScheme = Get-ActivePowerScheme
-    if (-not $onBattery) { Set-PowerScheme $script:highPerformanceGuid }
+    if (-not $script:previousPowerScheme) { Add-Log 'Geçerli güç planı okunamadı; BOOST başlatılmadı.'; return }
     $script:efficiencyTargets = @{}
-    Save-RuntimeState
+    if (-not (Save-RuntimeState)) { return }
+    if (-not $onBattery) { Set-PowerScheme $script:highPerformanceGuid }
     Enable-GameMode
     if ($script:options.CloseGameBar) { Stop-AutoBoostGameBar }
     Stop-InfaticaIfRunning
@@ -876,15 +926,17 @@ function Start-Boost {
     }
 
     Stop-SaverForBoost
+    if ($script:saver -or $script:modeRecoveryPending -or $script:runtimeRecoveryPending) { Add-Log 'Önce bekleyen ayar geri yüklemesini tamamla (Modlar > Yenile).'; return }
     $script:boostButton.Enabled = $false
     $form.UseWaitCursor = $true
     $freeBefore = $memory[0]
     try {
         $script:boostMode = 'manual'
         $script:previousPowerScheme = Get-ActivePowerScheme
-        Set-PowerScheme $script:highPerformanceGuid
+        if (-not $script:previousPowerScheme) { Add-Log 'Geçerli güç planı okunamadı; BOOST başlatılmadı.'; return }
         $script:efficiencyTargets = @{}
-        Save-RuntimeState
+        if (-not (Save-RuntimeState)) { return }
+        Set-PowerScheme $script:highPerformanceGuid
         Enable-GameMode
 
         $closing = @($gracefulRunning)
@@ -912,7 +964,11 @@ function Start-Boost {
         }
         Detect-AndOptimizeGames $after
         if ($script:boosted) { $script:boostTimer.Start() }
-    } finally { $form.UseWaitCursor = $false }
+    } finally {
+        $form.UseWaitCursor = $false
+        # BOOST did not start (plan unreadable, backup not written): the button must work again.
+        if (-not $script:boosted) { $script:boostButton.Enabled = $true }
+    }
 
     if ($script:boosted -and $script:options.MinimizeOnBoost) { Hide-ToTray }
     [GameBoostEngine]::TrimCurrentProcess()
@@ -927,9 +983,11 @@ function Restore-NormalMode {
         foreach ($id in @($script:detectedGames.Keys)) { [void]$script:autoBoostSuppressed.Add("${id}:$($script:detectedGames[$id])") }
     }
     Complete-GameSession
-    if ($script:previousPowerScheme) { Set-PowerScheme $script:previousPowerScheme }
+    $powerRestored = Restore-BoostPowerScheme $script:previousPowerScheme
     $restored = Restore-EfficiencyTargets
-    Clear-RuntimeState
+    $script:runtimeRecoveryPending = -not $powerRestored -or $script:efficiencyTargets.Count -gt 0
+    if ($script:runtimeRecoveryPending) { [void](Save-RuntimeState); Add-Log 'Bazı BOOST ayarları geri alınamadı; yedek korundu (Modlar > Yenile).' }
+    else { Clear-RuntimeState }
     Clear-CurrentGameFile
     if ($script:boostTimer) { $script:boostTimer.Stop() }
     $script:boosted = $false
@@ -1193,6 +1251,80 @@ function Clear-UserRecycleBin {
     if ((Show-UiMessage $message 'Geri Dönüşüm Kutusu' 'YesNo' 'Warning') -ne 'Yes') { return }
     Clear-RecycleBin -Force -ErrorAction SilentlyContinue
     Add-Log "Geri Dönüşüm Kutusu boşaltıldı ($what)."
+}
+
+# ---------------------------------------------------------------- recent items (privacy)
+# Only Windows' own "recently used" lists are emptied: list entries, never the files themselves.
+# Pinned items (Quick Access, Start, taskbar jump lists) stay; browsers and other apps are not touched.
+
+$script:explorerKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer'
+
+function Get-RecentListTargets {
+    return @(
+        [pscustomobject]@{ Label = 'Çalıştır (Win+R) geçmişi'; Path = "$script:explorerKey\RunMRU"; Recurse = $false }
+        [pscustomobject]@{ Label = 'Dosya Gezgini adres çubuğu geçmişi'; Path = "$script:explorerKey\TypedPaths"; Recurse = $false }
+        [pscustomobject]@{ Label = 'Dosya Gezgini arama geçmişi'; Path = "$script:explorerKey\WordWheelQuery"; Recurse = $true }
+        [pscustomobject]@{ Label = 'Aç / Kaydet pencerelerindeki son dosyalar'; Path = "$script:explorerKey\ComDlg32\OpenSavePidlMRU"; Recurse = $true }
+        [pscustomobject]@{ Label = 'Aç / Kaydet pencerelerindeki son klasörler'; Path = "$script:explorerKey\ComDlg32\LastVisitedPidlMRU"; Recurse = $false }
+        [pscustomobject]@{ Label = 'Son belgeler kaydı'; Path = "$script:explorerKey\RecentDocs"; Recurse = $true }
+    )
+}
+
+# Values of one list key (and its sub keys). MRUList / MRUListEx only hold the order: removed, not counted.
+function Get-RecentListValues {
+    param([string]$Path, [bool]$Recurse)
+    $values = [Collections.Generic.List[object]]::new()
+    $keys = @(Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue)
+    if ($Recurse -and $keys.Count -gt 0) { $keys += @(Get-ChildItem -LiteralPath $Path -Recurse -ErrorAction SilentlyContinue) }
+    foreach ($key in $keys) {
+        if (-not $key) { continue }
+        foreach ($name in $key.GetValueNames()) {
+            if ($name -eq '') { continue }
+            $values.Add([pscustomobject]@{ Key = $key.PSPath; Name = $name; Counted = $name -notmatch '^MRUList' })
+        }
+    }
+    return $values
+}
+
+# The shell's Recent folder (shortcuts only). Its AutomaticDestinations / CustomDestinations sub
+# folders hold pinned jump list items and are never touched.
+function Get-RecentShortcutFiles {
+    $folder = [Environment]::GetFolderPath('Recent')
+    if (-not $folder -or $folder -notmatch '\\Microsoft\\Windows\\Recent\\?$') { return @() }
+    return @(Get-ChildItem -LiteralPath $folder -Filter '*.lnk' -File -Force -ErrorAction SilentlyContinue)
+}
+
+function Clear-ShellRecentDocuments { [GameBoostShell]::ClearRecentDocuments() }
+
+function Invoke-RecentItemsCleanup {
+    $shortcuts = @(Get-RecentShortcutFiles)
+    $lines = [Collections.Generic.List[string]]::new()
+    if ($shortcuts.Count -gt 0) { $lines.Add("   •  Son açılan dosyalar ($($shortcuts.Count)): Hızlı Erişim, Başlat önerileri") }
+    $plan = @(foreach ($target in Get-RecentListTargets) {
+        $values = @(Get-RecentListValues $target.Path $target.Recurse)
+        $count = @($values | Where-Object Counted).Count
+        if ($count -gt 0) { $lines.Add("   •  $($target.Label) ($count)") }
+        [pscustomobject]@{ Target = $target; Values = $values; Count = $count }
+    })
+    $total = $shortcuts.Count + [int](($plan | Measure-Object -Property Count -Sum).Sum)
+    if ($total -eq 0) { [void](Show-UiMessage 'Temizlenecek son kullanılan öğe yok.' 'Son kullanılanlar'); return }
+    $message = "Windows'un son kullanılanlar listeleri temizlenecek:`r`n`r`n$($lines -join "`r`n")`r`n`r`n" +
+        "Dosyaların kendisi silinmez. Sabitlenmiş öğeler (Hızlı Erişim, Başlat, görev çubuğu) korunur. " +
+        "Tarayıcı geçmişine ve diğer uygulamalara dokunulmaz.`r`n`r`nTemizlenen listeler geri getirilemez. Devam edilsin mi?"
+    if ((Show-UiMessage $message 'Son kullanılanları temizle' 'YesNo' 'Question') -ne 'Yes') { return }
+
+    try { Clear-ShellRecentDocuments } catch { }
+    # Whatever the shell left behind: plain shortcut files directly in the Recent folder.
+    Get-RecentShortcutFiles | Remove-Item -Force -ErrorAction SilentlyContinue
+    foreach ($item in $plan) {
+        foreach ($value in $item.Values) { Remove-ItemProperty -LiteralPath $value.Key -Name $value.Name -Force -ErrorAction SilentlyContinue }
+    }
+    $left = @(Get-RecentShortcutFiles).Count
+    foreach ($item in $plan) { $left += @(Get-RecentListValues $item.Target.Path $item.Target.Recurse | Where-Object Counted).Count }
+    $removed = [math]::Max(0, $total - $left)
+    $summary = "SON KULLANILANLAR TEMİZLENDİ`r`n$removed öğe listeden kaldırıldı$(if ($left -gt 0) { ", $left öğe kullanımda olduğu için kaldı" }).`r`n`r`n"
+    if ($script:maintenanceBox) { $script:maintenanceBox.Text = $summary + $script:maintenanceBox.Text }
+    Add-Log "Son kullanılanlar temizlendi: $removed öğe."
 }
 
 function Update-MaintenanceRecommendations {

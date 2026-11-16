@@ -839,14 +839,22 @@ function Get-DeviceInfo {
         $info.Version = Get-BluetoothVersionName $lmp
     }
 
-    $paired = foreach ($device in @($all | Where-Object { $_.InstanceId -match '^BTH(ENUM|LE)\\DEV_([0-9A-F]{12})' })) {
+    $bluetooth = @($all | Where-Object { $_.InstanceId -match '^BTH(ENUM|LE)\\DEV_([0-9A-F]{12})' })
+    # One query for every battery level instead of one per device (each query takes ~0.2 s).
+    $batteries = @{}
+    if ($bluetooth.Count -gt 0) {
+        foreach ($property in @(Get-PnpDeviceProperty -InstanceId @($bluetooth.InstanceId) -KeyName '{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2' -ErrorAction SilentlyContinue)) {
+            if ($property.InstanceId -and $null -ne $property.Data) { $batteries[$property.InstanceId] = $property.Data }
+        }
+    }
+    $paired = foreach ($device in $bluetooth) {
         $address = ([regex]::Match($device.InstanceId, 'DEV_([0-9A-F]{12})')).Groups[1].Value
         $classes = @($present | Where-Object { $_.InstanceId -match $address } | ForEach-Object Class)
         $kind = if ($classes -match 'AudioEndpoint|MEDIA') { 'Ses' }
             elseif ($classes -match 'XboxComposite|XnaComposite') { 'Kumanda' }
             elseif ($classes -match 'HIDClass|Keyboard|Mouse') { 'Giriş aygıtı' }
             else { 'Diğer' }
-        $battery = (Get-PnpDeviceProperty -InstanceId $device.InstanceId -KeyName '{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2' -ErrorAction SilentlyContinue).Data
+        $battery = $batteries[$device.InstanceId]
         [pscustomobject]@{
             Name = $device.FriendlyName; Kind = $kind; Present = $device.Present
             Battery = if ($null -ne $battery) { "%$battery" } else { '—' }
@@ -979,17 +987,22 @@ function Get-NvidiaDetails {
 }
 
 function Get-BatteryDetails {
-    $path = Join-Path $env:TEMP 'gameboost-battery.xml'
+    $path = Join-Path $env:TEMP ('gameboost-battery-' + [guid]::NewGuid().ToString('N') + '.xml')
     try {
         & powercfg.exe /batteryreport /xml /output $path /duration 1 2>$null | Out-Null
-        [xml]$xml = Get-Content -LiteralPath $path -Raw
-        $battery = @($xml.BatteryReport.Batteries.Battery)[0]
-        if (-not $battery) { return $null }
-        $design = [double]$battery.DesignCapacity
-        $full = [double]$battery.FullChargeCapacity
+        if ($LASTEXITCODE -ne 0) { return $null }
+        [xml]$xml = Get-Content -LiteralPath $path -Raw -ErrorAction Stop
+        $batteries = @($xml.BatteryReport.Batteries.Battery | Where-Object { $_ })
+        if (-not $batteries.Count) { return $null }
+        $battery = $batteries[0]
+        $design = 0.0; $full = 0.0
+        foreach ($item in $batteries) {
+            if ([double]$item.DesignCapacity -le 0 -or [double]$item.FullChargeCapacity -le 0) { return $null }
+            $design += [double]$item.DesignCapacity; $full += [double]$item.FullChargeCapacity
+        }
         return [pscustomobject]@{
             Name = "$($battery.Manufacturer) $($battery.Id)".Trim(); Chemistry = $battery.Chemistry
-            DesignMwh = $design; FullMwh = $full; Cycles = $battery.CycleCount
+            DesignMwh = $design; FullMwh = $full; Cycles = $(if ($batteries.Count -eq 1) { $battery.CycleCount } else { 'Birden fazla pil' })
             Health = if ($design -gt 0) { [math]::Round(100 * $full / $design, 1) } else { $null }
         }
     } catch { return $null }

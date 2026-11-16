@@ -1,4 +1,4 @@
-GAMEBOOST LITE 2.0
+﻿GAMEBOOST LITE 2.0
 ==================
 
 Masaüstündeki "GameBoost Lite" kısayolu uygulamayı Windows'un imzalı PowerShell'i
@@ -160,21 +160,23 @@ PC PUANI
 
 MODLAR
 ------
-Her değişiklik yapılmadan önce modes-state.json'a yazılır; mod kapanınca,
-uygulama kapanınca veya (çökmede) sonraki açılışta birebir geri alınır.
+Mod ayarları değiştirilmeden önce modes-state.json'a yazılır. Geri yükleme
+başarısızsa yedek silinmez; Modlar > Yenile veya sonraki açılışta tekrar denenir.
+Kullanıcının sonradan değiştirdiği güç, parlaklık ve ekran değerleri korunur.
 - İndirme modu: bilgisayar uyumaz (ekran kapanabilir; kapak kapanırsa uyur),
   Wi-Fi güç tasarrufu kapanır, Wi-Fi koparsa aynı ağa 3 kez yeniden bağlanmayı
   dener. Anlık ↓/↑ hız Mbps ve MB/sn olarak, paket kullanımı (%).
-  - Paket hızı: hat boştayken haftada en fazla bir kez kısa hız testiyle
-    ölçülür (~10 sn, ölçülü bağlantıda yapılmaz).
-  - Darboğaz kararı (son 30 sn): internet paketinin sınırında / Wi-Fi sınırlıyor
-    (gerekirse "Wi-Fi ayarlarını uygula") / yükleme hattı dolu / kaynak yavaş.
-    Paket hızını hiçbir uygulama artıramaz; mod yerel engelleri gösterir.
+  - Pasif ölçüm: arka planda hız testi başlatılmaz. Kullanıcının önceki hız
+    testiyle karşılaştırılır; ölçülen hız abonelik paketi olarak sunulmaz.
+  - Son 30 sn için olası Wi-Fi / upload / kaynak sınırları gösterilir.
+    Bu gözlemler kesin neden kanıtı değildir; aktarım sırasında ağ ayarı
+    değiştiren kısayol gösterilmez. Hız testi Ağ sayfasından elle yapılır.
   - Bitişi algılama: Steam (steamapps\downloading + appmanifest ilerlemesi),
     Epic (yarım kurulum işareti), tarayıcı / torrent (.crdownload, .part...).
     İlerleme, kalan süre; bitince adıyla bildirir ve (ayar açıksa) modu kapatır.
-    Takip edilemeyenlerde trafik 2 dk durgun kalınca. Steam hâlâ listeliyorsa
-    "ilerlemiyor" der, modu kapatmaz.
+    Trafiğin durması tamamlanma sayılmaz. Steam kurulum bitişi, Epic'in açık
+    tamamlanma işareti veya tarayıcının tam eşleşen yeni dosyası gerekir.
+    Belirsiz/kaybolmuş tek bir aktarım bile otomatik kapanmayı engeller.
   - "İndirme / yükleme başlayınca otomatik aç" (başlangıçta kapalı): Steam /
     Epic, 50 MB üstü tarayıcı indirmesi veya 2 dk yoğun trafik görülünce açar ve
     bildirir. Elle kapatırsan 30 dk tekrar açmaz.
@@ -233,25 +235,36 @@ bulgular için bildirim gönderir. Hiçbir şeyi kapatmaz, silmez veya değişti
 HAFTALIK ÖZET, PİL, SÜRÜCÜ VE ÇÖZÜMLER (Bakım ve Güvenlik)
 ---------------------------------------------------------
 Günde bir hafif okuma (disk boş alanı, pilin tam kapasitesi, ekran kartı sürücü
-tarihi) ve şarjda %100'de geçen dakikaların sayımı (health-history.json, 60 gün).
+tarihi) ve uygulama açıkken prizde ≥%98 gözlenen dakikalar (60 gün).
 - Haftalık: oyun süresi, ekran kartı sıcaklığı ve geçen haftaya göre farkı
-  (+5°C ve üstü → fan / hava girişi temizliği), ısı yavaşlaması, takılmalar ve en
-  sık nedeni, pil sağlığı (tasarım kapasitesine göre, aylık değişim), %100'de
-  prizde geçen günler, disk, sürücü yaşı, güvenlik. Haftada bir sessiz bildirim.
+  (farklı oyunlardan arıza sonucu çıkarılmaz), GPU sınır bildirimleri,
+  takılmalarla olası ilişkiler, Windows pil kapasite tahmini, disk ve sürücü
+  tarihi. Son 20 oturumdan elde edilen kapsam belirtilir. Haftalık bildirim.
 - Çözümler (her biri yalnızca tıklayınca):
-  - Takılma nedeni Defender → oyunun kendi klasörünü taramadan hariç tut
-    (yalnızca Steam / Epic / Xbox / EA / Ubisoft / Rockstar kütüphanesindeki
-    klasörler; İndirilenler, Temp gibi klasörler asla önerilmez). Yönetici izni
-    ister, ne eklendiği kaydedilir ve aynı listeden "Geri al" ile kaldırılır.
+  - Defender etkinliğiyle örtüşme → Windows Güvenliği. Yeni klasör istisnası
+    eklenmez. Önceki sürümden istisna kaydı varsa Windows Güvenliği'nde
+    kontrol edilmesi önerilir; mevcut koruma ayarları kendiliğinden değişmez.
   - Windows Update → Etkin saatler; RAM → Kapatma listesi; indirme → Steam
     indirmeleri; ısı → OMEN Gaming Hub; Wi-Fi → Ağ / Wi-Fi; arka planda yoran
     uygulama → BOOST kapatma listesine ekle (korunan uygulamalar eklenmez).
-  - Sürücü 120 günden eskiyse → NVIDIA App (yoksa sürücü sayfası).
-  - Pil bir haftada 3+ gün 8 saatten uzun %100'de prizde → HP pil koruması
-    (BIOS > Adaptive Battery Optimizer veya OMEN Gaming Hub).
-- İndirme modu: "Bitince bilgisayarı uyut" (başlangıçta kapalı). İndirme bitince
-  60 sn geri sayım ve bildirim; fare / klavye kullanılırsa, oyun / tam ekran
-  açılırsa veya yeni indirme başlarsa iptal. Tepsiden "Uykuyu iptal et".
+  - Sürücü tarihi 120 günden eskiyse güncellemeyi kontrol et önerisi;
+    yeni sürümün var olduğu iddia edilmez. NVIDIA App yalnızca NVIDIA için.
+  - Pil: yüksek doluluk gözlemi; modelin pil koruması desteği varsayılmaz.
+- "Bu indirme bitince uyut": yalnızca o oturum için elle seçilir, kaydedilmez.
+  Doğrulanmış bitiş ve 2 dk ağ sessizliği (0,1 Mbps altı; Windows hiç tam
+  susmaz, boşta birkaç KB/sn ölçüldü) sonrasında 60 sn geri sayım başlar.
+  Geri sayımda ortalama 0,1 Mbps üstü trafik, ağ bağdaştırıcısı değişimi, ağ
+  belirsizliği, fare/klavye, oyun, yeni indirme veya izleme kesintisi uykuyu
+  iptal eder; amaç aktarımı riske atmadan açık kalmaktır.
+  Tepsiden veya Modlar sayfasından iptal edilir. Geri sayım boyunca otomatik
+  uyku engeli korunur. Windows uyku isteğini reddederse günlüğe yazılır.
+
+DOĞRULAMA
+---------
+tests\Safety.Tests.ps1 Windows PowerShell 5.1 ile çalıştırılır. Güç planı,
+ekran, EcoQoS ve uyku işlemleri taklittir; gerçek uygulamalar kapatılmaz.
+İzole test verileri tests\.fixtures-* altında kalır. Gerçek oyun performansını
+ve bilgisayarın fiziksel uyku davranışını bu testler ölçmez.
 
 OYUNA HAZIRLIK VE OYUN GEÇMİŞİ
 ------------------------------

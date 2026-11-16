@@ -7,3 +7,5 @@ _yedek-*/
 legacy/*.exe
 
 *.tmp
+tests/.fixtures-*/
+tests/.ui-*/

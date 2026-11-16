@@ -14,6 +14,28 @@ try {
     [void][Windows.Forms.MessageBox]::Show("GameBoost bileşenleri yüklenemedi:`r`n$($_.Exception.Message)", 'GameBoost Lite', 'OK', 'Error')
     exit 1
 }
+
+# An error inside a window event (timer, click, tray menu) is not covered by
+# ErrorActionPreference: .NET would show its "unhandled exception" box, whose Quit button closes
+# GameBoost. Such errors go to crash.log instead and the app keeps running. Must come before
+# the first window is created.
+[GameBoostCrashLog]::Install((Join-Path $env:LOCALAPPDATA 'GameBoostLite\crash.log'))
+$script:caughtErrors = 0
+[Windows.Forms.Application]::SetUnhandledExceptionMode([Windows.Forms.UnhandledExceptionMode]::CatchException)
+[Windows.Forms.Application]::add_ThreadException({
+    param($sender, $eventArgs)
+    try {
+        $exception = $eventArgs.Exception
+        $record = if ($exception -is [Management.Automation.IContainsErrorRecord]) { $exception.ErrorRecord } else { $null }
+        $where = if ($record -and $record.InvocationInfo) { $record.InvocationInfo.PositionMessage } else { '' }
+        $stack = if ($record -and $record.ScriptStackTrace) { $record.ScriptStackTrace } else { [string]$exception.StackTrace }
+        [GameBoostCrashLog]::Write("Yakalanan hata: $($exception.GetType().FullName): $($exception.Message)`r`n$where`r`n$stack")
+        $script:caughtErrors++
+        if ($script:caughtErrors -eq 1 -and $script:logBox) { Add-Log 'Bir hata yakalandı; GameBoost çalışmaya devam ediyor (ayrıntı: crash.log).' }
+    } catch { }
+})
+# Taskbar identity: GameBoost's own icon and name instead of Windows PowerShell (see Repair-AppShortcuts).
+[void][GameBoostShell]::SetProcessAppId('GameBoostLite.Main')
 [Windows.Forms.Application]::EnableVisualStyles()
 
 $createdNew = $false
@@ -30,6 +52,8 @@ if (-not $ownsInstance) {
     }
     exit
 }
+# A start line without a matching "Kapandı" line means the process was ended from outside.
+[GameBoostCrashLog]::Write("Başladı (PID $PID$(if ($Startup) { ', Windows ile' })$(if ($Restart) { ', yeniden başlatma' })).")
 
 . (Join-Path $script:appRoot 'lib\Ui.ps1')
 . (Join-Path $script:appRoot 'lib\Boost.ps1')
@@ -162,6 +186,7 @@ $form.Add_FormClosing({
         Hide-ToTray
         return
     }
+    [GameBoostCrashLog]::Write("Kapanıyor: $($e.CloseReason).")
     if ($script:boosted) { Restore-NormalMode 'Uygulama kapandı; normal moda dönüldü.' }
     Stop-AllModes
 })
@@ -174,6 +199,11 @@ $form.Add_Shown({
         if ($script:currentPage -in 'home', 'care') { Update-HomeAlerts }
     }
 })
+# Shortcut icons and the taskbar identity; reads three small files, writes only when something is off.
+Start-DelayedAction 3000 {
+    $fixed = Repair-AppShortcuts
+    if ($fixed -gt 0) { Add-Log "Kısayol simgeleri güncellendi ($fixed)." }
+}
 
 Update-BoostUi
 Add-Log 'Hazır. Oyundan önce açık çalışmalarını kaydet.'
@@ -192,6 +222,8 @@ if ($script:startHidden) {
 # Application.Run (not ShowDialog): hiding the window must not end the message loop.
 try {
     [Windows.Forms.Application]::Run($form)
+} catch {
+    [GameBoostCrashLog]::Write("Uygulama döngüsü hatayla bitti: $($_.Exception.GetType().FullName): $($_.Exception.Message)`r`n$($_.ScriptStackTrace)")
 } finally {
     if ($script:boosted) { Restore-NormalMode 'Uygulama kapandı; normal moda dönüldü.' }
     Stop-AllModes
@@ -207,6 +239,7 @@ try {
     Set-OverlayHotkeys $false
     if ($script:hotkeyFilter) { [Windows.Forms.Application]::RemoveMessageFilter($script:hotkeyFilter) }
     if ($script:appIcon) { $script:appIcon.Dispose() }
+    [GameBoostCrashLog]::Write('Kapandı.')
     try { $script:instanceMutex.ReleaseMutex() } catch { }
     $script:instanceMutex.Dispose()
 }

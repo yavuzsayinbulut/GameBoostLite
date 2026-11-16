@@ -1,17 +1,17 @@
 ﻿# Weekly health summary, battery care, driver age and one-click fixes for the causes of hitches.
 # One cheap reading a day (disk, battery, driver date) plus a minute counter while the battery sits
 # at 100 % on the charger. Everything is local. The only change made for you is the one you click;
-# the Defender exclusion needs admin, is written down and is undone from the same list.
+# Legacy Defender exclusions are listed for manual review; no new exclusions are created.
 
 function Get-HealthFile { return Join-Path $script:settingsDirectory 'health-history.json' }
 function Get-GamePathsFile { return Join-Path $script:settingsDirectory 'game-paths.json' }
 function Get-DefenderExclusionsFile { return Join-Path $script:settingsDirectory 'defender-exclusions.json' }
-function Get-DefenderResultFile { return Join-Path $script:settingsDirectory 'defender-result.txt' }
 
 $script:health = $null
 $script:healthSavedAt = [datetime]::MinValue
 $script:driverInfo = @()
 $script:designJob = $null
+$script:healthReadDate = $null
 
 function Read-JsonFile {
     param([string]$Path)
@@ -72,11 +72,16 @@ function Update-HealthMinute {
     $day = Get-HealthDay
     $power = Get-PowerSample
     if ($power.Online -and $power.HasBattery -and $null -ne $power.Percent -and $power.Percent -ge 98) { $day.AtFullMinutes++ }
-    $newDay = $null -eq $day.FreeGb
+    $newDay = $script:healthReadDate -ne (Get-HealthToday)
     if ($newDay) {
+        $script:healthReadDate = Get-HealthToday
         $day.FreeGb = Get-SystemFreeGb
         $battery = Get-BatteryReading
         if ($battery -and $battery[1] -gt 0) { $day.FullMwh = $battery[1] }
+    }
+    # Defer registry and report work until the game has finished. Populate after app restart too.
+    if (-not $script:boosted -and $script:driverReadDate -ne (Get-HealthToday)) {
+        $script:driverReadDate = Get-HealthToday
         $script:driverInfo = @(Get-DriverInfo)
         Start-BatteryDesignRead
     }
@@ -112,7 +117,7 @@ function Start-BatteryDesignRead {
 function Get-BatteryHealth {
     $state = Get-HealthState
     $latest = @($state.Days | Where-Object { $_.FullMwh -gt 0 }) | Select-Object -Last 1
-    if (-not $latest -or -not ($state.DesignMwh -gt 0)) { return $null }
+    if (-not $latest -or -not ($state.DesignMwh -gt 0) -or $latest.Date -lt (Get-Date).AddDays(-2).ToString('yyyy-MM-dd')) { return $null }
     $monthAgo = @($state.Days | Where-Object { $_.FullMwh -gt 0 -and $_.Date -le (Get-Date).AddDays(-25).ToString('yyyy-MM-dd') }) | Select-Object -Last 1
     return [pscustomobject]@{
         Percent = [math]::Round(100 * $latest.FullMwh / $state.DesignMwh); FullWh = [math]::Round($latest.FullMwh / 1000, 1); DesignWh = [math]::Round($state.DesignMwh / 1000, 1)
@@ -168,6 +173,7 @@ function Get-WeeklySummary {
     $lines = [Collections.Generic.List[string]]::new()
     $highlights = [Collections.Generic.List[string]]::new()
     $lines.Add("HAFTALIK SAĞLIK ÖZETİ · $($now.AddDays(-7).ToString('dd.MM')) – $($now.ToString('dd.MM'))")
+    $lines.Add('Yerel kayıtlardaki oturumlar; ölçülmeyen süreler ve eski silinmiş kayıtlar dahil değildir.')
     $lines.Add('')
 
     $minutes = ($thisWeek | Measure-Object Minutes -Sum).Sum
@@ -179,11 +185,11 @@ function Get-WeeklySummary {
     $oldTemps = @($lastWeek | Where-Object { $_.GpuMaxTemp -gt 0 } | ForEach-Object { [double]$_.GpuMaxTemp })
     if ($temps.Count) {
         $average = [math]::Round(($temps | Measure-Object -Average).Average)
-        $text = "Ekran kartı: oyunlarda en yüksek ortalama $average°C"
+        $text = "Ölçüldü: $($temps.Count) oturumun en yüksek GPU sıcaklıklarının ortalaması $average°C"
         if ($oldTemps.Count) {
             $delta = $average - [math]::Round(($oldTemps | Measure-Object -Average).Average)
             $text += " ($(if ($delta -ge 0) { '+' })$delta°C geçen haftaya göre)"
-            if ($delta -ge 5) { $text += ' → ısı artıyor: hava girişlerini ve fanları temizlet'; $highlights.Add("ekran kartı $delta°C daha sıcak") }
+            $text += ' · oyun, ayar, süre ve ortam farklı olabilir; bu fark tek başına arıza kanıtı değildir.'
         }
         $lines.Add($text)
     }
@@ -195,20 +201,20 @@ function Get-WeeklySummary {
         $hitches = ($hitchGames | Measure-Object Hitches -Sum).Sum
         $causes = @($hitchGames | ForEach-Object { @($_.HitchCauses) } | Where-Object { $_ } | Group-Object | Sort-Object Count -Descending | Select-Object -First 2 |
             ForEach-Object { (Get-HitchCauseInfo $_.Name)[0] })
-        $lines.Add("Takılma: $hitches$(if ($causes) { " · en sık neden: $($causes -join ', ') (Çözümler sekmesi)" })")
-        if ($causes) { $highlights.Add("takılma nedeni: $($causes[0])") }
-    } elseif ($thisWeek.Count) { $lines.Add('Takılma: ölçülmedi (FPS yetkisi gerekiyor: FPS / HUD sayfası)') }
+        $lines.Add("Ölçüldü: $($hitchGames.Count) oturumda $hitches takılma$(if ($causes) { " · olası ilişkiler: $($causes -join ', ') (Çözümler sekmesi)" })")
+        if ($causes) { $highlights.Add("takılmalarla olası ilişki: $($causes[0])") }
+    } elseif ($thisWeek.Count) { $lines.Add('Takılma: yeterli ölçüm yok; izin ve ölçüm durumuna FPS / HUD sayfasından bak.') }
 
     $battery = Get-BatteryHealth
     if ($battery) {
-        $text = 'Pil: sağlık %{0} ({1:0.#} / {2:0.#} Wh)' -f $battery.Percent, $battery.FullWh, $battery.DesignWh
+        $text = 'Pil: Windows kapasite tahmini %{0} ({1:0.#} / {2:0.#} Wh); laboratuvar sağlık testi değildir.' -f $battery.Percent, $battery.FullWh, $battery.DesignWh
         if ($null -ne $battery.MonthAgoPercent) { $text += " · bir ay önce %$($battery.MonthAgoPercent)" }
         $lines.Add($text)
     }
     $fullDays = Get-FullChargeDays
     if ($fullDays -gt 0) {
-        $lines.Add("Pil $fullDays gün 8 saatten uzun %100'de prizde kaldı$(if ($fullDays -ge 3) { ' → pil korumasını aç (Çözümler)' })")
-        if ($fullDays -ge 3) { $highlights.Add('pil sürekli %100''de') }
+        $lines.Add("Uygulama açıkken $fullDays gün en az 8 saat pil ≥%98 ve prizde gözlendi; kesintisiz süre ölçümü değildir.")
+        if ($fullDays -ge 3) { $highlights.Add('pil yüksek dolulukta uzun süre prizde gözlendi') }
     }
 
     $days = (Get-HealthState).Days
@@ -222,17 +228,16 @@ function Get-WeeklySummary {
 
     $driver = @($script:driverInfo | Where-Object { $_.Name -match 'NVIDIA|Radeon|AMD|Arc' }) | Select-Object -First 1
     if ($driver) {
-        $lines.Add("Sürücü: $($driver.Name -replace '^NVIDIA GeForce ', '') · $($driver.Date.ToString('dd.MM.yyyy')) ($($driver.Days) gün)$(if ($driver.Days -gt 120) { ' → güncelle' })")
-        if ($driver.Days -gt 120) { $highlights.Add('sürücü eski') }
+        $lines.Add("Sürücü: $($driver.Name) · $($driver.Date.ToString('dd.MM.yyyy')) ($($driver.Days) gün). Yeni sürüm bulunup bulunmadığı kontrol edilmedi.")
+        if ($driver.Days -gt 120) { $highlights.Add('sürücü güncellemesini kontrol edebilirsin') }
     }
 
     $security = @($script:securityQuick | Where-Object { $_.Severity -in 'warning', 'critical' })
     $lines.Add("Güvenlik: $(if ($null -eq $script:securityQuick) { 'henüz kontrol edilmedi' } elseif ($security.Count) { "$($security.Count) bulgu (Güvenlik sekmesi)" } else { 'son kontrolde sorun yok' })")
     if ($security.Count) { $highlights.Add("$($security.Count) güvenlik bulgusu") }
 
-    $fixes = @(Get-FixItems | Where-Object Button)
     $lines.Add('')
-    $lines.Add($(if ($fixes.Count) { "Öneriler: Çözümler sekmesinde $($fixes.Count) tek tıklık çözüm var." } else { 'Öneriler: şu an yapılacak bir şey yok.' }))
+    $lines.Add('Öneriler: Çözümler sekmesinde gözlemleri ve ilgili ayarlara bağlantıları görebilirsin.')
     return [pscustomobject]@{ Lines = $lines; Highlights = $highlights }
 }
 
@@ -242,18 +247,18 @@ function Invoke-HealthNotices {
     $state = Get-HealthState
     if (((Get-Date) - [datetime]$state.LastWeekly).TotalDays -ge 7) {
         $summary = Get-WeeklySummary
-        $text = if ($summary.Highlights.Count) { ($summary.Highlights | Select-Object -First 3) -join ' · ' } else { 'Her şey yolunda görünüyor.' }
+        $text = if ($summary.Highlights.Count) { ($summary.Highlights | Select-Object -First 3) -join ' · ' } else { 'Henüz yeterli ölçüm yok' }
         if (Send-SmartNotice 'weekly' 'Haftalık özet hazır' "$text. Ayrıntılar Bakım ve Güvenlik > Haftalık." 'weekly' 10080) {
             $state.LastWeekly = Get-HealthToday
             Save-HealthState
         }
     }
     if ((Get-FullChargeDays) -ge 3) {
-        [void](Send-SmartNotice 'battery-care' 'Pil sürekli %100''de prizde' 'Pil böyle daha hızlı yıpranır. HP pil korumasını aç (Bakım ve Güvenlik > Çözümler).' 'fixes' 10080)
+        [void](Send-SmartNotice 'battery-care' 'Pil yüksek dolulukta uzun süre prizde' 'Uygulama açıkken ≥%98 doluluk sık gözlendi. Modelinin desteklediği pil koruma seçeneklerini kontrol edebilirsin (Çözümler).' 'fixes' 10080)
     }
     $driver = Get-OldGpuDriver
     if ($driver) {
-        [void](Send-SmartNotice 'driver-old' 'Ekran kartı sürücüsü eski' "$($driver.Name): $($driver.Days) gün önceki sürüm. Yeni oyunlarda performans ve hata düzeltmeleri kaçıyor olabilir." 'fixes' 20160)
+        [void](Send-SmartNotice 'driver-old' 'Sürücü güncellemesini kontrol et' "$($driver.Name): sürücü tarihi $($driver.Days) gün önce. Bu, yeni sürüm bulunduğu veya mevcut sürücünün sorunlu olduğu anlamına gelmez." 'fixes' 20160)
     }
 }
 
@@ -284,39 +289,6 @@ function Get-GameFolder {
 
 function Get-DefenderExclusions { return @((Read-JsonFile (Get-DefenderExclusionsFile)) | ForEach-Object { $_ } | Where-Object { $_ }) }
 
-# Elevated (UAC), then read back by the elevated script itself: a standard user cannot see exclusions.
-function Set-DefenderExclusion {
-    param([string]$Folder, [switch]$Remove)
-    $folderLiteral = ConvertTo-ScriptLiteral $Folder
-    $resultLiteral = ConvertTo-ScriptLiteral (Get-DefenderResultFile)
-    Remove-Item -LiteralPath (Get-DefenderResultFile) -Force -ErrorAction SilentlyContinue
-    $lines = if ($Remove) {
-        @("Remove-MpPreference -ExclusionPath $folderLiteral",
-          "if (@((Get-MpPreference).ExclusionPath) -notcontains $folderLiteral) { 'ok' | Set-Content -LiteralPath $resultLiteral -Encoding ASCII } else { 'failed' | Set-Content -LiteralPath $resultLiteral -Encoding ASCII }")
-    } else {
-        @("Add-MpPreference -ExclusionPath $folderLiteral",
-          "if (@((Get-MpPreference).ExclusionPath) -contains $folderLiteral) { 'ok' | Set-Content -LiteralPath $resultLiteral -Encoding ASCII } else { 'failed' | Set-Content -LiteralPath $resultLiteral -Encoding ASCII }")
-    }
-    if (-not (Invoke-AdminScript $lines)) { return }
-    $script:pendingExclusion = [pscustomobject]@{ Folder = $Folder; Remove = [bool]$Remove }
-    Start-DelayedAction 8000 { Complete-DefenderExclusion }
-}
-
-function Complete-DefenderExclusion {
-    $pending = $script:pendingExclusion
-    $script:pendingExclusion = $null
-    if (-not $pending) { return }
-    $result = (Get-Content -LiteralPath (Get-DefenderResultFile) -Raw -ErrorAction SilentlyContinue)
-    Remove-Item -LiteralPath (Get-DefenderResultFile) -Force -ErrorAction SilentlyContinue
-    if ("$result".Trim() -ne 'ok') { Add-Log "Defender hariç tutması $(if ($pending.Remove) { 'kaldırılamadı' } else { 'eklenemedi' }): $($pending.Folder)"; return }
-    $list = [Collections.Generic.List[string]]::new()
-    foreach ($folder in (Get-DefenderExclusions)) { if ($folder -ne $pending.Folder) { $list.Add($folder) } }
-    if (-not $pending.Remove) { $list.Add($pending.Folder) }
-    if ($list.Count) { Write-JsonFile (Get-DefenderExclusionsFile) @($list) } else { Remove-Item -LiteralPath (Get-DefenderExclusionsFile) -Force -ErrorAction SilentlyContinue }
-    Add-Log $(if ($pending.Remove) { "Defender hariç tutması geri alındı: $($pending.Folder)" } else { "Defender bu oyun klasörünü artık taramıyor: $($pending.Folder)" })
-    Update-FixesPage
-}
-
 # ---------------------------------------------------------------- fixes (one click each)
 
 function Get-OmenHub {
@@ -345,35 +317,24 @@ function Get-FixItems {
             $seen[$kind] = $true
             $count = @($recent | Where-Object { @($_.HitchCauses) -contains $kind }).Count
             $info = Get-HitchCauseInfo $kind
-            $where = "Son $($recent.Count) oyunun $count tanesinde takılmalar $($info[0]) sırasında yoğunlaştı."
+            $where = "Olası ilişki: Son $($recent.Count) oturumun $count tanesinde takılmalar $($info[0]) sırasında yoğunlaştı. Bu, nedenini tek başına kanıtlamaz."
             switch -Wildcard ($kind) {
                 'defender' {
-                    $games = @($recent | Where-Object { @($_.HitchCauses) -contains 'defender' } | ForEach-Object { @($_.Games) } | Sort-Object -Unique)
-                    $excluded = Get-DefenderExclusions
-                    $offered = $false
-                    foreach ($game in $games) {
-                        $folder = Get-GameFolder $game
-                        if (-not $folder -or $excluded -contains $folder) { continue }
-                        $offered = $true
-                        $items.Add((New-FixItem "Defender: $game klasörünü taramadan hariç tut" `
-                            "$where Defender açık kalır, yalnızca bu oyun klasörü taranmaz ($folder). Yalnızca mağazadan kurduğun oyunlar için. Yönetici izni ister; buradan geri alınır." `
-                            'Hariç tut' { param($Folder) Set-DefenderExclusion $Folder } $folder))
-                    }
-                    if (-not $offered) { $items.Add((New-FixItem 'Defender taraması oyunda takılma yapıyor' "$where $($info[1])" 'Windows Güvenliği' { Start-Process 'windowsdefender:' } $null)) }
+                    $items.Add((New-FixItem 'Defender etkinliği ile takılmalar örtüştü' "$where Koruma geçmişini kontrol et; korumayı azaltan klasör istisnası önerilmez." 'Güvenlik' { Start-Process 'windowsdefender:' } $null))
                 }
-                'update' { $items.Add((New-FixItem 'Windows Update oyunda takılma yapıyor' "$where Oynadığın saatleri etkin saatlere ekle; güncelleme o sırada kurulmaz." 'Etkin saatler' { Start-Process 'ms-settings:windowsupdate-activehours' } $null)) }
+                'update' { $items.Add((New-FixItem 'Güncelleme etkinliği ile takılmalar örtüştü' "$where Etkin saatler otomatik yeniden başlatmayı düzenler; indirme ve kurulumun tümünü engellemez." 'Etkin saatler' { Start-Process 'ms-settings:windowsupdate-activehours' } $null)) }
                 'ram' { $items.Add((New-FixItem 'RAM oyunda doluyor' "$where Oyunda kapatılacak uygulamaları seç." 'Kapatma listesi' { Show-Page 'close' } $null)) }
                 'download' {
                     $steam = Get-RegistryValue 'HKCU:\Software\Valve\Steam' 'SteamPath'
-                    $items.Add((New-FixItem 'Arka plan indirmesi oyunda takılma yapıyor' "$where Steam > Ayarlar > İndirmeler > ""Oyun sırasında indirmelere izin ver"" kapalı olsun." `
+                    $items.Add((New-FixItem 'Ağ trafiği ile takılmalar örtüştü' "$where İndirme uygulamasındaki oyun sırasında indirme seçeneğini kontrol et." `
                         $(if ($steam) { 'Steam indirmeleri' } else { 'Modlar' }) $(if ($steam) { { Start-Process 'steam://open/downloads' } } else { { Show-Page 'modes' } }) $null))
                 }
                 'gpu' {
                     $omen = Get-OmenHub
-                    $items.Add((New-FixItem 'Ekran kartı ısınınca takılıyor' "$where Laptopu yükselt, hava girişlerini temizlet; OMEN Gaming Hub'da performans / fan modunu kontrol et." `
+                    $items.Add((New-FixItem 'GPU sınır bildirimi ile takılmalar örtüştü' "$where Havalandırmanın açık olduğunu ve üreticinin güç / fan ayarlarını kontrol et." `
                         $(if ($omen) { 'OMEN Hub' } else { '' }) { param($Uri) Start-Process $Uri } $omen))
                 }
-                'wifi' { $items.Add((New-FixItem 'Wi-Fi ping sıçramaları takılma yapıyor' "$where Wi-Fi sürücü önerilerini uygula veya kablo kullan." 'Ağ / Wi-Fi' { Show-Page 'network' } $null)) }
+                'wifi' { $items.Add((New-FixItem 'Ping sıçramaları ile takılmalar örtüştü' "$where Ağ sayfasından bağlantıyı kontrol et; mümkünse kablolu bağlantıyla karşılaştır." 'Ağ / Wi-Fi' { Show-Page 'network' } $null)) }
                 'cpu:*' {
                     $name = $kind.Substring(4)
                     $protected = Test-ProtectedCloseName $name
@@ -387,21 +348,19 @@ function Get-FixItems {
 
     $driver = Get-OldGpuDriver
     if ($driver) {
-        $app = Get-NvidiaApp
-        $items.Add((New-FixItem "Ekran kartı sürücüsü $($driver.Days) günlük" "$($driver.Name) · $($driver.Version) · $($driver.Date.ToString('dd.MM.yyyy')). Yeni oyunlar için yeni sürücüler performans ve hata düzeltmesi getirir." `
-            $(if ($app) { 'NVIDIA App' } else { 'Sürücü sayfası' }) { param($App) if ($App) { Start-Process $App } else { Start-Process 'https://www.nvidia.com/Download/index.aspx' } } $app))
+        $app = if ($driver.Name -match 'NVIDIA') { Get-NvidiaApp } else { $null }
+        $items.Add((New-FixItem "Sürücü tarihi: $($driver.Days) gün önce" "Genel öneri: $($driver.Name) · $($driver.Version) · $($driver.Date.ToString('dd.MM.yyyy')). Daha yeni sürüm olup olmadığı doğrulanmadı; tarihi tek başına sorun göstermez." `
+            $(if ($app) { 'NVIDIA App' } else { 'Güncellemeler' }) { param($App) if ($App) { Start-Process $App } else { Start-Process 'ms-settings:windowsupdate' } } $app))
     }
     if ((Get-FullChargeDays) -ge 3) {
-        $omen = Get-OmenHub
-        $items.Add((New-FixItem 'Pil sürekli %100''de prizde' "Son bir haftada $(Get-FullChargeDays) gün 8 saatten uzun. Pil böyle daha hızlı yıpranır. HP: BIOS (açılışta F10) > Gelişmiş > ""Adaptive Battery Optimizer"" veya OMEN Gaming Hub pil ayarı." `
-            $(if ($omen) { 'OMEN Hub' } else { '' }) { param($Uri) Start-Process $Uri } $omen))
+        $items.Add((New-FixItem 'Pil yüksek dolulukta uzun süre prizde' "Ölçüldü: uygulama açıkken $(Get-FullChargeDays) gün en az 8 saat ≥%98 doluluk gözlendi. Genel öneri: üreticinin bu model için desteklediği pil koruma ayarlarını kontrol et; destek varsayılmaz." 'Pil ayarları' { Start-Process 'ms-settings:batterysaver' } $null))
     }
     $battery = Get-BatteryHealth
     if ($battery -and $battery.Percent -lt 80) {
-        $items.Add((New-FixItem "Pil sağlığı %$($battery.Percent)" ('Tam kapasite {0:0.#} / {1:0.#} Wh. %80 altında pil süresi belirgin kısalır; uzun pil süresi gerekiyorsa pil değişimi düşünülebilir.' -f $battery.FullWh, $battery.DesignWh) '' $null $null))
+        $items.Add((New-FixItem "Pil kapasite tahmini %$($battery.Percent)" ('Windows bildirimi: {0:0.#} / {1:0.#} Wh. Değer değişebilir; tek ölçümle pil arızası veya değişim kararı verilmez.' -f $battery.FullWh, $battery.DesignWh) '' $null $null))
     }
     foreach ($folder in (Get-DefenderExclusions)) {
-        $items.Add((New-FixItem 'Defender hariç tutması (GameBoost ekledi)' "$folder taranmıyor. Geri almak için tıkla (yönetici izni ister)." 'Geri al' { param($Folder) Set-DefenderExclusion $Folder -Remove } $folder))
+        $items.Add((New-FixItem 'Önceki sürümün Defender istisna kaydı' "$folder için eski bir kayıt var; güncel durum doğrulanmadı. Windows Güvenliği > Virüs ve tehdit koruması > Dışlamalar bölümünde kontrol et. Bu sürüm istisna eklemez." 'Güvenlik' { Start-Process 'windowsdefender:' } $null))
     }
     return $items
 }

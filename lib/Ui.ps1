@@ -296,11 +296,17 @@ function Set-UiValue {
     $script:toolTip.SetToolTip($label, $label.Text)
 }
 
+# Wait cursor and a repaint, without DoEvents: DoEvents would also run timers and clicks in the
+# middle of the work (a second page load inside the first one).
 function Invoke-UiBusy {
     param([scriptblock]$Action)
     $form.UseWaitCursor = $true
-    [Windows.Forms.Application]::DoEvents()
-    try { & $Action } finally { $form.UseWaitCursor = $false }
+    [Windows.Forms.Cursor]::Current = [Windows.Forms.Cursors]::WaitCursor
+    $form.Update()
+    try { & $Action } finally {
+        $form.UseWaitCursor = $false
+        [Windows.Forms.Cursor]::Current = [Windows.Forms.Cursors]::Default
+    }
 }
 
 function Copy-UiText {

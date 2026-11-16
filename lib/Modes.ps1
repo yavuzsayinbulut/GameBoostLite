@@ -13,6 +13,7 @@ $script:energySaverThreshold = 'e69653ca-cf7f-4f05-aa73-cb833fa90ad4'
 $script:buttonsSubgroup = '4f971e89-eebd-4455-a8de-9e59040e7347'
 $script:lidActionSetting = '5ca83367-6e45-459f-a27b-476b1d01c936'
 $script:lastBusy = @()
+$script:modeRecoveryPending = $false
 
 # ---------------------------------------------------------------- seams (tests replace these)
 
@@ -104,8 +105,8 @@ function Get-NetworkTotals {
 function Save-ModesState {
     try {
         if (-not $script:download -and -not $script:saver) {
-            Remove-Item -LiteralPath $script:modesStateFile -Force -ErrorAction SilentlyContinue
-            return
+            if (Test-Path -LiteralPath $script:modesStateFile) { Remove-Item -LiteralPath $script:modesStateFile -Force -ErrorAction Stop }
+            return $true
         }
         $state = [ordered]@{ SavedAt = (Get-Date).ToString('o'); Download = $null; Saver = $null }
         if ($script:download) { $state.Download = [ordered]@{ Plan = @($script:download.Plan) } }
@@ -116,39 +117,96 @@ function Save-ModesState {
                     [ordered]@{ Id = $_.Id; CreateTime = [string]$_.CreateTime; Priority = $_.Priority; Control = $_.Control; State = $_.State } })
             }
         }
-        New-Item -ItemType Directory -Path $script:settingsDirectory -Force | Out-Null
+        New-Item -ItemType Directory -Path $script:settingsDirectory -Force -ErrorAction Stop | Out-Null
         $temp = "$($script:modesStateFile).tmp"
-        ConvertTo-Json -InputObject $state -Depth 5 | Set-Content -LiteralPath $temp -Encoding UTF8
-        Move-Item -LiteralPath $temp -Destination $script:modesStateFile -Force
-    } catch { }
+        ConvertTo-Json -InputObject $state -Depth 5 | Set-Content -LiteralPath $temp -Encoding UTF8 -ErrorAction Stop
+        Move-Item -LiteralPath $temp -Destination $script:modesStateFile -Force -ErrorAction Stop
+        return $true
+    } catch { Add-Log "Mod yedeği yazılamadı; mevcut yedek korundu: $($_.Exception.Message)"; return $false }
 }
 
 function Restore-PlanEntries {
     param($Entries)
     $changed = $false
+    $ok = $true
     foreach ($entry in @($Entries | ForEach-Object { $_ })) {
         if ($null -eq $entry -or -not $entry.Scheme) { continue }
-        if (Write-PlanValue ([string]$entry.Scheme) ([string]$entry.Subgroup) ([string]$entry.Setting) ([bool]$entry.PluggedIn) ([int]$entry.Old)) { $changed = $true }
+        $current = Read-PlanValue $entry.Scheme $entry.Subgroup $entry.Setting $entry.PluggedIn
+        if ($current -lt 0) { $ok = $false; continue }
+        # The user may have changed the setting while this mode was active.
+        if ($current -eq $entry.Old -or $current -ne $entry.New) { continue }
+        if (Write-PlanValue $entry.Scheme $entry.Subgroup $entry.Setting $entry.PluggedIn $entry.Old) { $changed = $true }
+        if ((Read-PlanValue $entry.Scheme $entry.Subgroup $entry.Setting $entry.PluggedIn) -ne $entry.Old) { $ok = $false }
     }
     if ($changed) { Update-ActivePlan }
+    return $ok
+}
+
+function Restore-ModeEfficiency {
+    param($Target)
+    $process = Get-Process -Id $Target.Id -ErrorAction SilentlyContinue
+    if (-not $process) { return $true }
+    $created = [GameBoostEngine]::CreateTime([int]$Target.Id)
+    if ($created -gt 0 -and $created -ne [long]$Target.CreateTime) { return $true }
+    return [GameBoostEngine]::TryRestoreEfficiency([int]$Target.Id, [long]$Target.CreateTime, [uint32]$Target.Priority, [uint32]$Target.Control, [uint32]$Target.State)
+}
+
+function Get-EfficiencyBackup {
+    param($Process)
+    if ([GameBoostEngine]::CreateTime($Process.Id) -ne $Process.CreateTime) { return $null }
+    $priority = [GameBoostEngine]::GetPriority($Process.Id)
+    $qos = [GameBoostEngine]::GetThrottling($Process.Id)
+    if ($priority -ne 32 -or $null -eq $qos) { return $null }
+    return [pscustomobject]@{ Id=$Process.Id; CreateTime=$Process.CreateTime; Priority=$priority; Name=$Process.Name; Control=$qos[0]; State=$qos[1] }
+}
+
+function Apply-EfficiencyBackup {
+    param($Target)
+    return [GameBoostEngine]::TryEnableEfficiencyFromBackup($Target.Id, [long]$Target.CreateTime, [uint32]$Target.Priority, [uint32]$Target.Control, [uint32]$Target.State)
+}
+
+function Restore-ModeBrightness {
+    param($Light)
+    if (-not $Light) { return $true }
+    $current = Get-Brightness
+    if ($current -lt 0) { return $false }
+    if ($current -ne $Light.New) { return $true }
+    [void](Set-Brightness $Light.Old)
+    return (Get-Brightness) -eq $Light.Old
+}
+
+function Restore-ModeDisplay {
+    param($Display)
+    if (-not $Display) { return $true }
+    $monitor = @(Get-ModeMonitors | Where-Object GdiName -eq $Display.Gdi) | Select-Object -First 1
+    if (-not $monitor) { return $false }
+    if ([int][math]::Round($monitor.Refresh) -ne $Display.To) { return $true }
+    # Never change a resolution or refresh rate that the user/game selected later.
+    if (-not $Display.Width -or -not $Display.Height) { return $false }
+    if ($monitor.Width -ne $Display.Width -or $monitor.Height -ne $Display.Height) { return $true }
+    [void](Set-DisplayRefresh $Display.Gdi $Display.From)
+    $check = @(Get-ModeMonitors | Where-Object GdiName -eq $Display.Gdi) | Select-Object -First 1
+    return $check -and [int][math]::Round($check.Refresh) -eq $Display.From
 }
 
 # After a crash: put back whatever the modes had changed.
 function Restore-StaleModes {
     if (-not (Test-Path -LiteralPath $script:modesStateFile)) { return $false }
     try {
-        $state = Get-Content -LiteralPath $script:modesStateFile -Raw | ConvertFrom-Json
-        Restore-PlanEntries (@($state.Download.Plan) + @($state.Saver.Plan))
-        if ($state.Saver.Display -and $state.Saver.Display.Gdi) { [void](Reset-DisplayRefresh ([string]$state.Saver.Display.Gdi)) }
-        $light = $state.Saver.Brightness
-        if ($light -and (Get-Brightness) -eq [int]$light.New) { [void](Set-Brightness ([int]$light.Old)) }
+        $state = Get-Content -LiteralPath $script:modesStateFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if (-not $state -or -not $state.SavedAt -or (-not $state.Download -and -not $state.Saver)) { throw 'Invalid mode recovery record' }
+        $ok = Restore-PlanEntries (@($state.Download.Plan) + @($state.Saver.Plan))
+        if (-not (Restore-ModeDisplay $state.Saver.Display)) { $ok = $false }
+        if (-not (Restore-ModeBrightness $state.Saver.Brightness)) { $ok = $false }
         foreach ($item in @($state.Saver.Efficiency | ForEach-Object { $_ })) {
             if ($null -eq $item) { continue }
-            [void][GameBoostEngine]::TryRestoreEfficiency([int]$item.Id, [long]$item.CreateTime, [uint32]$item.Priority, [uint32]$item.Control, [uint32]$item.State)
+            if (-not (Restore-ModeEfficiency $item)) { $ok = $false }
         }
+        if ($ok) { Remove-Item -LiteralPath $script:modesStateFile -Force -ErrorAction Stop; $script:modeRecoveryPending = $false; return $true }
     } catch { }
-    Remove-Item -LiteralPath $script:modesStateFile -Force -ErrorAction SilentlyContinue
-    return $true
+    $script:modeRecoveryPending = $true
+    Add-Log 'Bazı mod ayarları geri alınamadı; yedek korundu. Modlar > Yenile ile tekrar dene.'
+    return $false
 }
 
 function New-PlanEntry {
@@ -161,6 +219,7 @@ function New-PlanEntry {
 function Start-DownloadMode {
     param([string]$AutoReason)
     if ($script:download) { return }
+    if ($script:modeRecoveryPending) { Add-Log 'Önce bekleyen mod geri yüklemesini tamamla (Modlar > Yenile).'; return }
     $scheme = if ($script:boosted -and $script:previousPowerScheme) { $script:previousPowerScheme } else { Get-ActivePowerScheme }
     $connection = Get-ConnectionProfileInfo
     $totals = Get-NetworkTotals
@@ -169,10 +228,11 @@ function Start-DownloadMode {
         Profile = if ($connection -and $connection.Wlan) { $connection.Name } else { $null }
         LastReceived = $totals[0]; LastSent = $totals[1]; LastAt = Get-ModesNow
         Received = [int64]0; Sent = [int64]0; RateDown = 0.0; RateUp = 0.0; PeakDown = 0.0
-        BusySeconds = 0.0; QuietSeconds = 0.0; Notified = $false
+        BusySeconds = 0.0; QuietSeconds = 0.0; Notified = $false; DoneNotified = $false
         WifiDownSince = $null; ReconnectTries = 0; TrackedAt = $null; ConnectionsAt = $null
         Samples = [Collections.Generic.List[object]]::new()
         Tracked = @{}; Completed = [Collections.Generic.List[string]]::new(); SawTracked = $false; Connections = ''
+        Unresolved = [Collections.Generic.HashSet[string]]::new(); TrackingOk = $false
         Metered = [bool]($connection -and $connection.Cost -in 'Fixed', 'Variable'); PlanChecked = $false; AutoReason = $AutoReason
     }
     # Wi-Fi power saving off (plugged in and on battery) on the user's own plan.
@@ -181,7 +241,7 @@ function Start-DownloadMode {
         if ($scheme -and $old -gt 0) { $download.Plan.Add((New-PlanEntry $scheme $script:wifiPowerSubgroup $script:wifiPowerSetting $pluggedIn $old 0)) }
     }
     $script:download = $download
-    Save-ModesState
+    if (-not (Save-ModesState)) { $script:download = $null; return }
     $written = 0
     foreach ($entry in $download.Plan) { if (Write-PlanValue $entry.Scheme $entry.Subgroup $entry.Setting $entry.PluggedIn 0) { $written++ } }
     if ($written -gt 0) { Update-ActivePlan }
@@ -195,13 +255,15 @@ function Start-DownloadMode {
 function Stop-DownloadMode {
     param([string]$Reason = 'İndirme modu kapandı; bilgisayar yeniden uyuyabilir.', [switch]$Manual)
     if (-not $script:download) { return }
+    Stop-SleepCountdown
+    $script:options.DownloadSleepAfter = $false
     # Turned off by hand: the automatic start leaves the same download alone for half an hour.
     if ($Manual) { $script:downloadAutoPausedUntil = (Get-ModesNow).AddMinutes(30) }
-    Restore-PlanEntries $script:download.Plan
+    if (-not (Restore-PlanEntries $script:download.Plan)) { Add-Log 'Wi-Fi güç ayarı geri alınamadı; indirme modu ve yedeği korundu.'; Update-ModesUi; return }
     $totals = 'toplam ↓ {0} · ↑ {1}' -f (Format-ByteSize $script:download.Received), (Format-ByteSize $script:download.Sent)
     $script:download = $null
     Set-KeepAwake $false
-    Save-ModesState
+    [void](Save-ModesState)
     Add-Log "$Reason ($totals)"
     Update-ModesUi
 }
@@ -221,7 +283,7 @@ function Update-DownloadMode {
     $mode.RateDown = $down * 8 / $seconds / 1e6
     $mode.RateUp = $up * 8 / $seconds / 1e6
     # The plan speed test's own traffic is not a download.
-    if ($script:planTest) { return }
+    if ($script:planTest -or $script:speedTest) { $mode.QuietSeconds = 0; return }
     if ($mode.RateDown -gt $mode.PeakDown) { $mode.PeakDown = $mode.RateDown }
     # One minute of samples (1 s apart while the page is open, 5 s otherwise).
     $mode.Samples.Add([pscustomobject]@{ At = $now; Down = $mode.RateDown; Up = $mode.RateUp })
@@ -254,18 +316,21 @@ function Update-DownloadMode {
     }
 
     $mbps = [math]::Max($mode.RateDown, $mode.RateUp)
-    if ($mode.WifiDownSince) { return }
-    if ($mbps -ge 1) { $mode.BusySeconds += $seconds; $mode.QuietSeconds = 0; $mode.Notified = $false }
-    elseif ($mbps -lt 0.2) { $mode.QuietSeconds += $seconds }
+    if ($mode.WifiDownSince) { $mode.QuietSeconds = 0; Stop-SleepCountdown 'Bağlantı koptu; uyku iptal edildi.'; return }
+    if ($mbps -ge 1) { $mode.BusySeconds += $seconds; $mode.Notified = $false }
+    # A quiet period must be continuous; slow transfers must not accumulate idle time.
+    # Windows is never fully silent (measured here: a few KB/s at rest), so quiet is below 0.1 Mbps.
+    if ($mbps -lt 0.1 -and $seconds -le 15) { $mode.QuietSeconds += $seconds }
+    else { $mode.QuietSeconds = 0 }
     $active = $mode.Tracked.Count
 
     # Every download Steam, Epic or the browser showed has finished and the line is quiet: done.
-    # (Announced even after an earlier "not progressing" notice; the list is emptied once said.)
-    if ($mode.SawTracked -and $active -eq 0 -and $mode.Completed.Count -gt 0 -and $mode.QuietSeconds -ge 60) {
+    # (Announced even after an earlier "not progressing" notice: Steam unpacks for minutes without traffic.)
+    if (-not $mode.DoneNotified -and $mode.TrackingOk -and $mode.Unresolved.Count -eq 0 -and $mode.SawTracked -and $active -eq 0 -and $mode.Completed.Count -gt 0 -and $mode.QuietSeconds -ge 120) {
+        $mode.DoneNotified = $true
         $mode.Notified = $true
         $text = "Tamamlandı: $($mode.Completed -join ', ')."
-        $mode.Completed.Clear()
-        Complete-DownloadMode $text 'İndirmeler tamamlandı'
+        Complete-DownloadMode $text 'İndirmeler tamamlandı' -Confirmed
         return
     }
     # Traffic that ran for a while and then stopped: finished, paused or stuck.
@@ -285,14 +350,19 @@ function Update-DownloadMode {
 
 # The download is over: tell, switch the mode off when asked, and with "Bitince uyut" count down to sleep.
 function Complete-DownloadMode {
-    param([string]$Text, [string]$Reason, [string]$Key = 'download-done', [string]$Title = 'İndirme tamamlandı')
-    $sleep = [bool]$script:options.DownloadSleepAfter
-    if ($script:options.DownloadAutoStop -or $sleep) {
-        Stop-DownloadMode "$Reason; İndirme modu kapandı, bilgisayar yeniden uyuyabilir."
-        $Text += ' İndirme modu kapandı.'
+    param([string]$Text, [string]$Reason, [string]$Key = 'download-done', [string]$Title = 'İndirme tamamlandı', [switch]$Confirmed)
+    if (-not $Confirmed) {
+        [void](Send-SmartNotice $Key $Title "$Text Tamamlanma doğrulanmadı; indirme modu açık tutuldu." 'modes' 1 -Important)
+        return
     }
-    if ($sleep) { Start-SleepCountdown $Text }
-    else { [void](Send-SmartNotice $Key $Title $Text 'modes' 1 -Important) }
+    $sleep = [bool]$script:options.DownloadSleepAfter
+    # Keep the mode and its sleep inhibition alive throughout the countdown.
+    if ($sleep) { Start-SleepCountdown $Text; return }
+    if ($script:options.DownloadAutoStop) {
+        Stop-DownloadMode "$Reason; İndirme modu kapandı, bilgisayar yeniden uyuyabilir."
+        $Text += $(if ($script:download) { ' Modun geri alınması tamamlanmadı; yedek korundu.' } else { ' İndirme modu kapandı.' })
+    }
+    [void](Send-SmartNotice $Key $Title $Text 'modes' 1 -Important)
 }
 
 # ---------------------------------------------------------------- sleep after the download
@@ -300,12 +370,45 @@ function Complete-DownloadMode {
 $script:sleepCountdown = $null
 function Get-IdleSeconds { return [GameBoostSystemState]::IdleSeconds() }
 function Invoke-SystemSleep { return [GameBoostSystemState]::Sleep() }
+function Test-SleepBusy { return $script:boosted -or [GameBoostEngine]::IsForegroundFullscreen() }
+
+# Include virtual adapters too: a VPN or upload must not be hidden by physical-NIC filtering.
+# Any counter change cancels sleep. This deliberately prefers staying awake to interrupting work.
+function Get-SleepNetworkSnapshot {
+    param([switch]$Refresh)
+    try {
+        if ($Refresh -or -not $script:sleepInterfaces -or ([datetime]::UtcNow - $script:sleepInterfacesAt).TotalSeconds -ge 5) {
+            $script:sleepInterfaces = @([Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | Where-Object {
+                $_.OperationalStatus -eq 'Up' -and $_.NetworkInterfaceType -ne 'Loopback'
+            } | Sort-Object Id)
+            $script:sleepInterfacesAt = [datetime]::UtcNow
+        }
+        $rows = $script:sleepInterfaces
+        if (-not $rows.Count) { return $null }
+        $received = [int64]0; $sent = [int64]0
+        foreach ($nic in $rows) { $stats = $nic.GetIPStatistics(); $received += $stats.BytesReceived; $sent += $stats.BytesSent }
+        return [pscustomobject]@{ Ids = ($rows.Id -join '|'); Received = $received; Sent = $sent }
+    } catch { $script:sleepInterfaces = @(); return $null }
+}
+
+# Windows keeps a few KB/s going at rest, so an exact match never holds. A new or lost adapter,
+# or more than 0.1 Mbps on average since the countdown began, counts as a transfer.
+function Test-SleepNetworkChanged {
+    param($Start, $Now, [double]$Seconds)
+    if (-not $Start -or -not $Now -or $Now.Ids -ne $Start.Ids) { return $true }
+    $bytes = ($Now.Received - $Start.Received) + ($Now.Sent - $Start.Sent)
+    return $bytes -lt 0 -or $bytes -gt 12500 * [math]::Max(5, $Seconds) + 65536
+}
 
 # 60 s to change your mind: any keyboard or mouse input, a game or a new download cancels it.
 function Start-SleepCountdown {
     param([string]$What)
-    if ($script:sleepCountdown) { return }
-    $script:sleepCountdown = [pscustomobject]@{ Started = Get-ModesNow; Seconds = 60 }
+    if ($script:sleepCountdown -or -not $script:download -or -not $script:options.DownloadSleepAfter) { return }
+    if (-not $script:download.TrackingOk -or $script:download.Tracked.Count -gt 0 -or $script:download.Unresolved.Count -gt 0 -or $script:download.Completed.Count -eq 0) { return }
+    if ((Test-SleepBusy) -or $script:planTest -or $script:speedTest) { return }
+    $network = Get-SleepNetworkSnapshot -Refresh
+    if (-not $network) { $script:options.DownloadSleepAfter = $false; Add-Log 'Ağ durumu doğrulanamadı; otomatik uyku kurulmadı.'; return }
+    $script:sleepCountdown = [pscustomobject]@{ Started = Get-ModesNow; LastAt = Get-ModesNow; Seconds = 60; Network = $network }
     Add-Log 'İndirme bitti; 60 sn sonra uyku moduna geçilecek (fare / klavye kullanılırsa iptal).'
     [void](Send-SmartNotice 'sleep-countdown' 'Bilgisayar 60 sn sonra uyuyacak' "$What Fareyi oynatırsan veya bir tuşa basarsan iptal olur." 'modes' 1 -Important)
     Update-ModesUi
@@ -315,6 +418,7 @@ function Stop-SleepCountdown {
     param([string]$Reason = 'Uyku iptal edildi.')
     if (-not $script:sleepCountdown) { return }
     $script:sleepCountdown = $null
+    $script:options.DownloadSleepAfter = $false
     Add-Log $Reason
     Update-ModesUi
 }
@@ -322,18 +426,36 @@ function Stop-SleepCountdown {
 function Update-SleepCountdown {
     $countdown = $script:sleepCountdown
     if (-not $countdown) { return }
-    $elapsed = ((Get-ModesNow) - $countdown.Started).TotalSeconds
+    $now = Get-ModesNow
+    $elapsed = ($now - $countdown.Started).TotalSeconds
+    if (($now - $countdown.LastAt).TotalSeconds -gt 15 -or $elapsed -lt 0) { Stop-SleepCountdown 'İzleme kesildi; uyku iptal edildi.'; return }
+    $countdown.LastAt = $now
     # Idle time shorter than the countdown means someone touched the PC after it began.
     if ((Get-IdleSeconds) + 2 -lt $elapsed) { Stop-SleepCountdown 'Fare / klavye kullanıldı; uyku iptal edildi.'; return }
-    if ($script:boosted -or $script:download -or [GameBoostEngine]::IsForegroundFullscreen()) {
+    if (-not $script:options.DownloadSleepAfter -or -not $script:download -or (Test-SleepBusy) -or $script:planTest -or $script:speedTest) {
         Stop-SleepCountdown 'Bilgisayar kullanımda (oyun, tam ekran veya yeni indirme); uyku iptal edildi.'
         return
     }
+    if (Test-SleepNetworkChanged $countdown.Network (Get-SleepNetworkSnapshot) $elapsed) {
+        Stop-SleepCountdown 'Ağ trafiği veya bağlantı değişti; uyku iptal edildi.'; return
+    }
+    if (-not $script:download.TrackingOk -or $script:download.Tracked.Count -gt 0 -or $script:download.Unresolved.Count -gt 0) {
+        Stop-SleepCountdown 'Aktarımın tamamlanması doğrulanamıyor; uyku iptal edildi.'; return
+    }
     if ($elapsed -lt $countdown.Seconds) { return }
+    Update-DownloadTracking
+    if (-not $script:download.TrackingOk -or $script:download.Tracked.Count -gt 0 -or $script:download.Unresolved.Count -gt 0) { Stop-SleepCountdown 'Yeni veya belirsiz aktarım var; uyku iptal edildi.'; return }
+    # A final uncached inventory closes the gap for newly connected adapters.
+    if (Test-SleepNetworkChanged $countdown.Network (Get-SleepNetworkSnapshot -Refresh) $elapsed) {
+        Stop-SleepCountdown 'Son kontrolde ağ durumu değişti; uyku iptal edildi.'; return
+    }
     $script:sleepCountdown = $null
-    Add-Log 'İndirme bittiği için bilgisayar uyku moduna alınıyor.'
+    $script:options.DownloadSleepAfter = $false
+    Stop-DownloadMode 'Doğrulanmış indirme tamamlandı; uykuya hazırlanılıyor.'
+    if ($script:download) { Add-Log 'Ayarlar geri alınamadı; uyku uygulanmadı.'; return }
     Update-ModesUi
-    [void](Invoke-SystemSleep)
+    if (Invoke-SystemSleep) { Add-Log 'Uyku isteği Windows tarafından kabul edildi.' }
+    else { Add-Log 'Windows uyku isteğini kabul etmedi.' }
 }
 
 # ---------------------------------------------------------------- what is downloading
@@ -357,11 +479,14 @@ function Read-SteamManifest {
 # Steam keeps a steamapps\downloading\<id> folder while it downloads, Epic marks unfinished installs,
 # browsers and torrent apps write .crdownload / .part files until the file is complete.
 function Get-ActiveDownloads {
+    $script:downloadScanOk = $true
     $items = [Collections.Generic.List[object]]::new()
+    try {
     foreach ($library in (Get-SteamLibraries)) {
+        if (-not [IO.Directory]::Exists($library)) { $script:downloadScanOk = $false; continue }
         $downloading = Join-Path $library 'steamapps\downloading'
         if (-not [IO.Directory]::Exists($downloading)) { continue }
-        foreach ($folder in @(Get-ChildItem -LiteralPath $downloading -Directory -ErrorAction SilentlyContinue)) {
+        foreach ($folder in @(Get-ChildItem -LiteralPath $downloading -Directory -ErrorAction Stop)) {
             if ($folder.Name -notmatch '^\d+$') { continue }
             $path = Join-Path $library "steamapps\appmanifest_$($folder.Name).acf"
             $manifest = Read-SteamManifest $path
@@ -370,12 +495,12 @@ function Get-ActiveDownloads {
         }
     }
     $epic = Get-EpicManifestFolder
-    foreach ($item in @(if ([IO.Directory]::Exists($epic)) { Get-ChildItem -LiteralPath $epic -Filter '*.item' -ErrorAction SilentlyContinue })) {
-        try { $json = [IO.File]::ReadAllText($item.FullName) | ConvertFrom-Json } catch { continue }
+    foreach ($item in @(if ([IO.Directory]::Exists($epic)) { Get-ChildItem -LiteralPath $epic -Filter '*.item' -ErrorAction Stop })) {
+        try { $json = [IO.File]::ReadAllText($item.FullName) | ConvertFrom-Json -ErrorAction Stop } catch { $script:downloadScanOk = $false; continue }
+        if ($json.bIsIncompleteInstall -isnot [bool]) { $script:downloadScanOk = $false; continue }
         if (-not $json.bIsIncompleteInstall) { continue }
         $items.Add([pscustomobject]@{ Key = "epic:$($json.AppName)"; Source = 'Epic'; Name = $json.DisplayName; Done = 0.0; Total = [double]$json.InstallSize; Path = $item.FullName })
     }
-    try {
         foreach ($file in [IO.Directory]::EnumerateFiles((Get-DownloadsFolder))) {
             if ($file -notmatch $script:partialFilePattern) { continue }
             $info = [IO.FileInfo]::new($file)
@@ -386,7 +511,7 @@ function Get-ActiveDownloads {
                 Name = ($info.Name -replace $script:partialFilePattern, ''); Done = [double]$info.Length; Total = 0.0; Path = $file; Modified = $info.LastWriteTime
             })
         }
-    } catch { }
+    } catch { $script:downloadScanOk = $false }
     return $items
 }
 
@@ -395,20 +520,26 @@ function Resolve-FinishedDownload {
     param($Item)
     if ($Item.Source -eq 'Steam') {
         $manifest = Read-SteamManifest $Item.Path
-        if ($manifest -and ($manifest.State -eq 4 -or ($manifest.Total -gt 0 -and $manifest.Done -ge $manifest.Total))) { return "Steam · $($Item.Name)" }
+        # Downloaded bytes alone do not mean unpacking / installation has completed.
+        if ($manifest -and $manifest.State -eq 4) { return "Steam · $($Item.Name)" }
         return $null
     }
     if ($Item.Source -eq 'Epic') {
-        try { if (-not ([IO.File]::ReadAllText($Item.Path) | ConvertFrom-Json).bIsIncompleteInstall) { return "Epic · $($Item.Name)" } } catch { }
+        try {
+            $manifest = [IO.File]::ReadAllText($Item.Path) | ConvertFrom-Json -ErrorAction Stop
+            if ($manifest.bIsIncompleteInstall -is [bool] -and -not $manifest.bIsIncompleteInstall -and $manifest.InstallLocation -and [IO.Directory]::Exists($manifest.InstallLocation)) { return "Epic · $($Item.Name)" }
+        } catch { }
         return $null
     }
     $final = $Item.Path -replace $script:partialFilePattern, ''
-    if (Test-Path -LiteralPath $final) { return '{0} ({1})' -f $Item.Name, (Format-ByteSize (Get-Item -LiteralPath $final).Length) }
-    # Chrome renames "Unconfirmed 123.crdownload" only at the end: take the newest file that appeared since.
-    $newest = Get-ChildItem -LiteralPath (Split-Path $Item.Path) -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -notmatch $script:partialFilePattern -and $_.LastWriteTime -ge $Item.FirstSeenLocal } |
-        Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if ($newest) { return '{0} ({1})' -f $newest.Name, (Format-ByteSize $newest.Length) }
+    # Only the exact expected file, absent when tracking began, is evidence. Never guess from
+    # another recently written file (Chrome's Unconfirmed names remain explicitly unknown).
+    if ($Item.FinalAbsent -eq $true -and [IO.File]::Exists($final)) {
+        $file = [IO.FileInfo]::new($final)
+        if ($file.Length -ge $Item.Done -and $file.Length -gt 0 -and $file.LastWriteTime -ge $Item.FirstSeenLocal) {
+            return '{0} ({1})' -f $Item.Name, (Format-ByteSize $file.Length)
+        }
+    }
     return $null
 }
 
@@ -416,25 +547,31 @@ function Update-DownloadTracking {
     $mode = $script:download
     if (-not $mode) { return }
     $current = @{}
+    $script:downloadScanOk = $true
     foreach ($item in (Get-ActiveDownloads)) { $current[$item.Key] = $item }
+    $mode.TrackingOk = $script:downloadScanOk
+    if (-not $mode.TrackingOk) { return }
     foreach ($key in @($mode.Tracked.Keys)) {
         if ($current.ContainsKey($key)) { continue }
         $item = $mode.Tracked[$key]
         $mode.Tracked.Remove($key)
         $finished = Resolve-FinishedDownload $item
         if ($finished) { $mode.Completed.Add($finished); Add-Log "İndirme tamamlandı: $finished" }
-        else { Add-Log "İndirme listeden çıktı (iptal edildi, duraklatıldı veya taşındı): $($item.Source) · $($item.Name)" }
+        else { [void]$mode.Unresolved.Add($key); Add-Log "İndirme listeden çıktı; tamamlanması belirsiz: $($item.Source) · $($item.Name)" }
     }
     $now = Get-ModesNow
     foreach ($key in @($current.Keys)) {
         $item = $current[$key]
+        [void]$mode.Unresolved.Remove($key)
         $old = $mode.Tracked[$key]
         if ($old) {
             $seconds = ($now - $old.SeenAt).TotalSeconds
-            $rate = if ($item.Done -gt $old.Done -and $seconds -gt 0) { ($item.Done - $old.Done) / $seconds } else { $old.Rate }
-            $item | Add-Member -NotePropertyMembers @{ FirstSeenLocal = $old.FirstSeenLocal; Rate = $rate; SeenAt = $now } -Force
+            $rate = if ($item.Done -gt $old.Done -and $seconds -gt 0) { ($item.Done - $old.Done) / $seconds } else { 0.0 }
+            $item | Add-Member -NotePropertyMembers @{ FirstSeenLocal = $old.FirstSeenLocal; Rate = $rate; SeenAt = $now; FinalAbsent = $old.FinalAbsent } -Force
         } else {
-            $item | Add-Member -NotePropertyMembers @{ FirstSeenLocal = (Get-Date).AddSeconds(-5); Rate = 0.0; SeenAt = $now } -Force
+            $final = $item.Path -replace $script:partialFilePattern, ''
+            $item | Add-Member -NotePropertyMembers @{ FirstSeenLocal = (Get-Date).AddSeconds(-5); Rate = 0.0; SeenAt = $now; FinalAbsent = -not [IO.File]::Exists($final) } -Force
+            $mode.Notified = $false; $mode.DoneNotified = $false
             Add-Log "İndirme izleniyor: $($item.Source) · $($item.Name)"
         }
         $mode.Tracked[$key] = $item
@@ -515,20 +652,20 @@ function Get-DownloadVerdict {
     $network = $script:insightCache.Network
     $pending = @($network.Rows | Where-Object { -not $_.Ok }).Count
     if ($test -and $test.Down -gt 0 -and $down -ge 0.8 * $test.Down) {
-        return & $verdict 'ok' "İnternet paketinin sınırında (~$(Format-Mbps $down))" "Hız testi ↓ $(Format-Mbps $test.Down). Ayar değiştirmek hızlandırmaz; mod bağlantıyı açık ve uyanık tutar." $null
+        return & $verdict 'ok' "Son hız testine yakın (~$(Format-Mbps $down))" "Ölçüldü: önceki test ↓ $(Format-Mbps $test.Down). Bu değer abonelik hızını veya hattın kesin sınırını göstermez." $null
     }
     if ($link -gt 0 -and $down -ge 0.5 * $link) {
         $hints = @()
         if ($network.Band -like '*2,4*') { $hints += '2,4 GHz: 5 GHz ağa geç.' }
         if ($pending -gt 0) { $hints += "$pending Wi-Fi sürücü ayarı hızı artırabilir (Wi-Fi birkaç sn kopar)." }
         $hints += 'Kablo en hızlısı.'
-        return & $verdict 'warning' "Wi-Fi sınırlıyor (bağlantı $link Mbps)" ($hints -join ' ') $(if ($pending -gt 0) { 'wifi-fix' } else { $null })
+        return & $verdict 'warning' "Wi-Fi sınırı olası (bağlantı $link Mbps)" ('Olası ilişki: ' + ($hints -join ' ') + ' Ayarları aktarım bitince kontrol et.') $null
     }
     if ($up -ge 2 -and (($test -and $test.Up -gt 0 -and $up -ge 0.7 * $test.Up) -or (-not $test -and $up -ge 0.5 * $down))) {
-        return & $verdict 'warning' "Yükleme hattı dolu (↑ $(Format-Mbps $up))" 'İndirme onayları gecikir, indirme yavaşlar. Yükleme yapan uygulamayı (OneDrive, yedekleme, torrent) duraklat.' $null
+        return & $verdict 'warning' "Yükleme yoğun (↑ $(Format-Mbps $up))" 'Olası ilişki: upload gecikmeyi etkiliyor olabilir. Aktarım uygulamasındaki hız sınırını kontrol et; uygulama kendiliğinden duraklatılmaz.' $null
     }
     if ($test -and $test.Down -gt 0 -and $down -lt 0.5 * $test.Down) {
-        return & $verdict 'info' "Kaynak yavaş: hattın ~$(Format-Mbps $test.Down) kaldırıyor" 'Sunucu veya uygulama sınırlıyor olabilir. Steam''de İndirme bölgesini değiştir, hız sınırını kaldır; aynı anda birden çok indirme varsa sırayla indir.' $null
+        return & $verdict 'info' "Son testten düşük (test ~$(Format-Mbps $test.Down))" 'Genel öneri: sunucu, uygulama hız sınırı, Wi-Fi veya disk işlemleri etkiliyor olabilir. Bu sayaçlar nedeni kesin ayıramaz.' $null
     }
     if (-not $test) { return & $verdict 'info' "↓ $(Format-Mbps $down)" 'Sınırın internet paketi mi Wi-Fi mı olduğunu ayırmak için bir kez Hız testi yap.' $null }
     return & $verdict 'ok' "↓ $(Format-Mbps $down) · beklenen aralıkta" "Hız testi ↓ $(Format-Mbps $test.Down)." $null
@@ -572,18 +709,10 @@ function New-PlanSpeedTest {
 # download would split the line and measure neither), never on a metered connection. Short: ~10 s.
 function Start-PlanSpeedCheck {
     $mode = $script:download
-    if (-not $mode -or $mode.PlanChecked -or $script:speedTest -or $script:planTest) { return }
-    # Never while a game runs: a full line for 10 s is a lag spike online. Tried again later.
-    if ($script:boosted -or [GameBoostEngine]::IsForegroundFullscreen()) { return }
+    if (-not $mode -or $mode.PlanChecked) { return }
     $mode.PlanChecked = $true
-    if ($script:lastSpeedResult -and ((Get-Date) - $script:lastSpeedResult.At).TotalDays -le 7) { return }
-    if ($mode.Metered -or $mode.RateDown -ge 1 -or $mode.RateUp -ge 1) {
-        Add-Log 'Paket hızı ölçülmedi: hat şu an kullanımda (veya bağlantı ölçülü). Uygun bir anda Hız testi yap.'
-        return
-    }
-    $script:planTest = New-PlanSpeedTest
-    Add-Log 'İndirme modu: hat boşta, paket hızı ölçülüyor (~10 sn, en fazla ~190 MB).'
-    Wait-UiJob $script:planTest { param($Job) Complete-PlanSpeedCheck $Job }
+    # A bandwidth test itself competes with transfers; compare to the last manual test instead.
+    if (-not $script:lastSpeedResult) { Add-Log 'Hız değerlendirmesi pasif izleniyor. İstersen aktarım bittikten sonra Hız testi yap.' }
 }
 
 function Complete-PlanSpeedCheck {
@@ -661,11 +790,13 @@ function Get-SaverDescription {
 
 function Start-SaverMode {
     param([ValidateSet('normal', 'super')][string]$Level = 'normal')
+    if ($script:modeRecoveryPending) { Add-Log 'Önce bekleyen mod geri yüklemesini tamamla (Modlar > Yenile).'; return $false }
     if ($script:boosted) {
         Add-Log 'BOOST açıkken tasarruf modu başlatılmaz.'
         return $false
     }
     if ($script:saver) { Stop-SaverMode -Quiet }
+    if ($script:saver) { return $false }
     $prefix = Get-SaverPrefix $Level
     $use = @{}
     foreach ($step in $script:saverDefaults[$prefix].Keys) { $use[$step] = [bool]$script:options["$prefix$step"] }
@@ -690,7 +821,7 @@ function Start-SaverMode {
             $hz = [int][math]::Round($panel.Refresh)
             $rates = @($panel.RatesAtResolution | ForEach-Object { [int]$_ })
             $target = if ($rates -contains 60) { 60 } else { @($rates | Where-Object { $_ -ge 48 -and $_ -lt $hz } | Sort-Object)[0] }
-            if ($target -and $hz -gt $target) { $saver.Display = [pscustomobject]@{ Gdi = $panel.GdiName; From = $hz; To = [int]$target } }
+            if ($target -and $hz -gt $target) { $saver.Display = [pscustomobject]@{ Gdi = $panel.GdiName; From = $hz; To = [int]$target; Width = $panel.Width; Height = $panel.Height } }
         }
     }
     if ($use.Brightness) {
@@ -701,7 +832,7 @@ function Start-SaverMode {
 
     # Write down what will change, then change it.
     $script:saver = $saver
-    Save-ModesState
+    if (-not (Save-ModesState)) { $script:saver = $null; return $false }
     $written = 0
     foreach ($entry in $saver.Plan) { if (Write-PlanValue $entry.Scheme $entry.Subgroup $entry.Setting $entry.PluggedIn $entry.New) { $written++ } }
     if ($written -gt 0) {
@@ -717,7 +848,7 @@ function Start-SaverMode {
         if (Set-Brightness $saver.Brightness.New) { $saver.Applied.Add("parlaklık %$($saver.Brightness.Old) → %$($saver.Brightness.New)") }
         else { $saver.Brightness = $null }
     }
-    Save-ModesState
+    [void](Save-ModesState)
     $name = if ($Level -eq 'super') { 'Süper tasarruf' } else { 'Tasarruf modu' }
     if ($use.Efficiency) { $saver.Applied.Insert(0, 'arka plan verimlilik modunda') }
     $what = if ($saver.Applied.Count -gt 0) { $saver.Applied -join ', ' } else { 'seçili adımların hepsi zaten tasarruflu' }
@@ -735,16 +866,18 @@ function Stop-SaverMode {
     $saver = $script:saver
     if (-not $saver) { return }
     $restored = 0
+    $ok = $true
+    $saver.UseEfficiency = $false
     foreach ($target in @($saver.Efficiency.Values)) {
-        [void][GameBoostEngine]::TryRestoreEfficiency($target.Id, [long]$target.CreateTime, [uint32]$target.Priority, [uint32]$target.Control, [uint32]$target.State)
-        $restored++
+        if (Restore-ModeEfficiency $target) { $restored++ } else { $ok = $false }
     }
     # A brightness the user changed in the meantime is theirs; only ours is put back.
-    if ($saver.Brightness -and (Get-Brightness) -eq $saver.Brightness.New) { [void](Set-Brightness $saver.Brightness.Old) }
-    if ($saver.Display) { [void](Undo-DisplayRefresh $saver.Display.Gdi) }
-    Restore-PlanEntries $saver.Plan
+    if (-not (Restore-ModeBrightness $saver.Brightness)) { $ok = $false }
+    if (-not (Restore-ModeDisplay $saver.Display)) { $ok = $false }
+    if (-not (Restore-PlanEntries $saver.Plan)) { $ok = $false }
+    if (-not $ok) { Add-Log 'Tasarruf ayarlarının geri alınması tamamlanmadı; yedek korundu. Kapat ile tekrar dene.'; Update-ModesUi; return }
     $script:saver = $null
-    Save-ModesState
+    [void](Save-ModesState)
     if (-not $Quiet) {
         if (-not $Reason) { $Reason = 'Tasarruf modu kapandı; ayarlar eski haline döndü.' }
         Add-Log "$Reason$(if ($restored -gt 0) { " $restored süreç normal hızına döndü." })"
@@ -770,16 +903,15 @@ function Update-SaverEfficiency {
     $added = [Collections.Generic.List[string]]::new()
     foreach ($process in $Busy) {
         if ($process.CpuPercent -lt 0.5 -or -not (Test-SaverCandidate $process $foreground)) { continue }
-        $control = [uint32]0; $state = [uint32]0
-        $previous = [GameBoostEngine]::TryEnableEfficiency($process.Id, $process.CreateTime, [ref]$control, [ref]$state)
-        if ($previous -eq 0) { continue }
-        $script:saver.Efficiency[$process.Key] = [pscustomobject]@{
-            Id = $process.Id; CreateTime = $process.CreateTime; Priority = $previous; Name = $process.Name; Control = $control; State = $state
-        }
+        $target = Get-EfficiencyBackup $process
+        if (-not $target) { continue }
+        $script:saver.Efficiency[$process.Key] = $target
+        if (-not (Save-ModesState)) { $script:saver.Efficiency.Remove($process.Key); continue }
+        if (-not (Apply-EfficiencyBackup $target)) { $script:saver.Efficiency.Remove($process.Key); [void](Save-ModesState); continue }
         if (-not $added.Contains($process.Name)) { $added.Add($process.Name) }
     }
     if ($added.Count -gt 0) {
-        Save-ModesState
+        [void](Save-ModesState)
         Add-Log "Tasarruf: $($added -join ', ') verimlilik moduna alındı."
     }
 }
@@ -798,10 +930,9 @@ function Watch-SaverForeground {
     foreach ($key in @($saver.Efficiency.Keys)) {
         $target = $saver.Efficiency[$key]
         if ($target.Name -ne $name) { continue }
-        [void][GameBoostEngine]::TryRestoreEfficiency($target.Id, [long]$target.CreateTime, [uint32]$target.Priority, [uint32]$target.Control, [uint32]$target.State)
-        $saver.Efficiency.Remove($key)
+        if (Restore-ModeEfficiency $target) { $saver.Efficiency.Remove($key) }
     }
-    Save-ModesState
+    [void](Save-ModesState)
 }
 
 # A game needs full power: BOOST ends the saver first.
@@ -1059,6 +1190,12 @@ function Invoke-DownloadAutoStart {
 # Once a minute (one process list, ~20 ms). Nothing runs here while BOOST is on.
 function Invoke-ModesMinute {
     $script:minuteCount++
+    # A restore that failed is tried again every 10 minutes, so automatic BOOST does not stay
+    # blocked until someone opens the Modlar page.
+    if (-not $script:boosted -and $script:minuteCount % 10 -eq 0) {
+        if ($script:runtimeRecoveryPending) { [void](Restore-StaleBoostState) }
+        if ($script:modeRecoveryPending -and -not $script:download -and -not $script:saver) { [void](Restore-StaleModes) }
+    }
     Update-BatteryMeter
     Update-HealthMinute
     Invoke-DownloadAutoStart
@@ -1071,6 +1208,8 @@ function Invoke-ModesMinute {
 }
 
 function Stop-AllModes {
+    Stop-SleepCountdown 'Uygulama kapanıyor; otomatik uyku iptal edildi.'
+    $script:options.DownloadSleepAfter = $false
     if ($script:saver) { Stop-SaverMode 'Uygulama kapandı; tasarruf ayarları geri alındı.' }
     if ($script:download) { Stop-DownloadMode 'Uygulama kapandı; İndirme modu kapandı.' }
 }

@@ -61,9 +61,12 @@ public static class GameBoostEngine {
     public static readonly HashSet<string> ExcludedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     // Steam tools that run next to a game for hours (live wallpaper, VR runtime, frame generation,
     // soundboard). Counted as games, they would keep BOOST on after the real game closes.
+    // Epic's own services (EpicOnlineServicesInstallHelper runs whenever the launcher is open) live
+    // under "Epic Games" too; counted as games they started automatic BOOST without any game.
     static readonly string[] NonGameSteamFolders = {
         "\\steamapps\\common\\wallpaper_engine\\", "\\steamapps\\common\\steamvr\\",
-        "\\steamapps\\common\\lossless scaling\\", "\\steamapps\\common\\soundpad\\"
+        "\\steamapps\\common\\lossless scaling\\", "\\steamapps\\common\\soundpad\\",
+        "\\epic games\\epic online services\\", "\\epic games\\directxredist\\", "\\epic games\\launcher\\"
     };
     // System processes whose CPU time is read for the session summary (Windows Update, Defender).
     public static readonly HashSet<string> SystemWatchNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -251,7 +254,9 @@ public static class GameBoostEngine {
         }
         // Installers and helpers that live inside game folders are not the game.
         return !(p.Contains("crashreport") || p.Contains("anticheat") || p.Contains("crashhandler") ||
-                 p.Contains("\\steamworks shared\\") || p.Contains("\\_commonredist\\") || p.Contains("\\redist\\"));
+                 p.Contains("\\steamworks shared\\") || p.Contains("\\_commonredist\\") || p.Contains("\\redist\\") ||
+                 p.Contains("installhelper") || p.Contains("\\__installer\\") || p.Contains("prereqsetup") ||
+                 p.EndsWith("\\unins000.exe") || p.Contains("vc_redist") || p.Contains("dxsetup"));
     }
 
     public static List<GameBoostProcessInfo> FindGames(List<GameBoostProcessInfo> snapshot) {
@@ -308,12 +313,28 @@ public static class GameBoostEngine {
             if (!SameProcess(handle, createTime)) return 0;
             uint previous = GetPriorityClass(handle);
             if (previous != NormalPriority) return 0;
-            ReadThrottling(handle, out previousControl, out previousState);
+            if (!ReadThrottling(handle, out previousControl, out previousState)) return 0;
             var state = new PowerThrottlingState();
-            state.Version = 1; state.ControlMask = 1; state.StateMask = 1;
+            state.Version = 1; state.ControlMask = previousControl | 1u; state.StateMask = previousState | 1u;
             bool eco = SetProcessInformation(handle, 4, ref state, (uint)Marshal.SizeOf(typeof(PowerThrottlingState)));
             bool lowered = SetPriorityClass(handle, BelowNormalPriority);
             return (eco || lowered) ? previous : 0;
+        } finally { CloseHandle(handle); }
+    }
+
+    // Compare the values written to the recovery journal before touching the process.
+    public static bool TryEnableEfficiencyFromBackup(int processId, long createTime, uint priority, uint control, uint state) {
+        IntPtr handle = OpenProcess(QueryLimited | SetInformation, false, processId);
+        if (handle == IntPtr.Zero) return false;
+        try {
+            uint currentControl, currentState;
+            if (!SameProcess(handle, createTime) || priority != NormalPriority || GetPriorityClass(handle) != priority ||
+                !ReadThrottling(handle, out currentControl, out currentState) || currentControl != control || currentState != state) return false;
+            var target = new PowerThrottlingState();
+            target.Version = 1; target.ControlMask = control | 1u; target.StateMask = state | 1u;
+            bool eco = SetProcessInformation(handle, 4, ref target, (uint)Marshal.SizeOf(typeof(PowerThrottlingState)));
+            bool lowered = SetPriorityClass(handle, BelowNormalPriority);
+            return eco || lowered;
         } finally { CloseHandle(handle); }
     }
 
@@ -332,15 +353,27 @@ public static class GameBoostEngine {
         if (handle == IntPtr.Zero) return false;
         try {
             if (!SameProcess(handle, createTime)) return false;
-            // Put back the app's own EcoQoS choice; 0/0 hands it back to Windows.
+            // Restore only our execution-speed bit. Preserve later application changes.
+            uint control, currentState;
+            if (!ReadThrottling(handle, out control, out currentState)) return false;
             var state = new PowerThrottlingState();
             state.Version = 1;
-            state.ControlMask = previousControl;
-            state.StateMask = previousState;
-            SetProcessInformation(handle, 4, ref state, (uint)Marshal.SizeOf(typeof(PowerThrottlingState)));
-            if (GetPriorityClass(handle) == BelowNormalPriority)
-                SetPriorityClass(handle, previousPriority == 0 ? NormalPriority : previousPriority);
-            return true;
+            state.ControlMask = (control & ~1u) | (previousControl & 1u);
+            state.StateMask = (currentState & ~1u) | (previousState & 1u);
+            bool ok = true;
+            if ((control & 1u) != 0 && (currentState & 1u) != 0) {
+                ok = SetProcessInformation(handle, 4, ref state, (uint)Marshal.SizeOf(typeof(PowerThrottlingState)));
+                uint checkControl, checkState;
+                ok = ok && ReadThrottling(handle, out checkControl, out checkState) &&
+                    (checkControl & 1u) == (previousControl & 1u) && (checkState & 1u) == (previousState & 1u);
+            }
+            uint priority = GetPriorityClass(handle);
+            if (priority == 0) return false;
+            if (priority == BelowNormalPriority) {
+                uint target = previousPriority == 0 ? NormalPriority : previousPriority;
+                ok = SetPriorityClass(handle, target) && GetPriorityClass(handle) == target && ok;
+            }
+            return ok;
         } finally { CloseHandle(handle); }
     }
 
@@ -1727,7 +1760,10 @@ public static class GameBoostSystemState {
 
     [StructLayout(LayoutKind.Sequential)] struct LastInput { public uint Size; public uint Time; }
     [DllImport("user32.dll")] static extern bool GetLastInputInfo(ref LastInput info);
-    [DllImport("powrprof.dll")] static extern bool SetSuspendState(bool hibernate, bool force, bool disableWakeEvents);
+    [DllImport("powrprof.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.U1)]
+    static extern bool SetSuspendState([MarshalAs(UnmanagedType.U1)] bool hibernate,
+        [MarshalAs(UnmanagedType.U1)] bool force, [MarshalAs(UnmanagedType.U1)] bool disableWakeEvents);
 
     // Seconds since the last keyboard or mouse input in this session.
     public static double IdleSeconds() {
@@ -1737,7 +1773,7 @@ public static class GameBoostSystemState {
         return unchecked((uint)Environment.TickCount - info.Time) / 1000.0;
     }
 
-    // Sleep (not hibernate), letting apps veto it.
+    // Sleep, not hibernate. bForce is ignored by Windows; callers must check their own guards.
     public static bool Sleep() { return SetSuspendState(false, false, false); }
 
     // { remaining mWh, full mWh, rate mW (negative while draining, 0 when Windows does not know) },
@@ -2590,5 +2626,178 @@ public class GameBoostAlertView : Panel {
                 TextRenderer.DrawText(g, item.Detail, DetailFont, new Rectangle(20, y + item.TitleHeight + 2, width, item.DetailHeight), DetailColor, flags);
             y += item.TitleHeight + item.DetailHeight + 14;
         }
+    }
+}
+
+// ---------------------------------------------------------------- crash log
+
+// Errors that would otherwise close the app end up here (UI thread errors are passed in from
+// PowerShell, background thread errors are caught below). Kept small: one old copy at 512 KB.
+public static class GameBoostCrashLog {
+    static readonly object sync = new object();
+    static string path;
+    const long MaxBytes = 512 * 1024;
+
+    public static string FilePath { get { return path; } }
+
+    public static void Install(string logPath) {
+        path = logPath;
+        AppDomain.CurrentDomain.UnhandledException += delegate(object sender, UnhandledExceptionEventArgs e) {
+            // Escaped Turkish text: this file stays plain ASCII for the .NET Framework compiler.
+            Write((e.IsTerminating ? "Kapanmaya yol açan arka plan hatası:\r\n" : "Arka plan hatası:\r\n") + e.ExceptionObject);
+        };
+    }
+
+    public static void Write(string text) {
+        if (string.IsNullOrEmpty(path)) return;
+        try {
+            lock (sync) {
+                string folder = Path.GetDirectoryName(path);
+                if (!string.IsNullOrEmpty(folder)) Directory.CreateDirectory(folder);
+                var file = new FileInfo(path);
+                if (file.Exists && file.Length > MaxBytes) {
+                    string old = path + ".old";
+                    if (File.Exists(old)) File.Delete(old);
+                    File.Move(path, old);
+                }
+                File.AppendAllText(path, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + "  " + text + "\r\n", Encoding.UTF8);
+            }
+        } catch { }
+    }
+}
+
+// ---------------------------------------------------------------- shortcuts, taskbar identity, recent items
+
+public static class GameBoostShell {
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)] static extern int SetCurrentProcessExplicitAppUserModelID(string appId);
+    [DllImport("shell32.dll")] static extern void SHAddToRecentDocs(uint flags, IntPtr data);
+    [DllImport("ole32.dll")] static extern int PropVariantClear(ref PropVariant value);
+
+    [ComImport, Guid("00021401-0000-0000-C000-000000000046")] class CShellLink { }
+
+    [ComImport, InterfaceType(ComInterfaceType.InterfaceIsIUnknown), Guid("000214F9-0000-0000-C000-000000000046")]
+    interface IShellLinkW {
+        void GetPath([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder file, int maxPath, IntPtr findData, uint flags);
+        void GetIDList(out IntPtr idList);
+        void SetIDList(IntPtr idList);
+        void GetDescription([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder name, int maxName);
+        void SetDescription([MarshalAs(UnmanagedType.LPWStr)] string name);
+        void GetWorkingDirectory([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder dir, int maxPath);
+        void SetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] string dir);
+        void GetArguments([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder args, int maxPath);
+        void SetArguments([MarshalAs(UnmanagedType.LPWStr)] string args);
+        void GetHotkey(out short hotkey);
+        void SetHotkey(short hotkey);
+        void GetShowCmd(out int showCmd);
+        void SetShowCmd(int showCmd);
+        void GetIconLocation([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder iconPath, int maxIconPath, out int iconIndex);
+        void SetIconLocation([MarshalAs(UnmanagedType.LPWStr)] string iconPath, int iconIndex);
+        void SetRelativePath([MarshalAs(UnmanagedType.LPWStr)] string pathRel, uint reserved);
+        void Resolve(IntPtr window, uint flags);
+        void SetPath([MarshalAs(UnmanagedType.LPWStr)] string file);
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    struct PropertyKey { public Guid FormatId; public uint PropertyId; }
+
+    // PROPVARIANT is 24 bytes on 64-bit Windows (16 on 32-bit). Declared smaller, Windows would
+    // write past it (GetValue, PropVariantClear) and overwrite the caller's stack.
+    [StructLayout(LayoutKind.Explicit, Size = 24)]
+    struct PropVariant {
+        [FieldOffset(0)] public ushort VarType;
+        [FieldOffset(8)] public IntPtr Pointer;
+        [FieldOffset(8)] public long Padding;
+        [FieldOffset(16)] public long Padding2;
+    }
+
+    [ComImport, InterfaceType(ComInterfaceType.InterfaceIsIUnknown), Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99")]
+    interface IPropertyStore {
+        void GetCount(out uint count);
+        void GetAt(uint index, out PropertyKey key);
+        void GetValue(ref PropertyKey key, out PropVariant value);
+        void SetValue(ref PropertyKey key, ref PropVariant value);
+        void Commit();
+    }
+
+    const ushort VtLpwstr = 31;
+    static PropertyKey AppIdKey() {
+        var key = new PropertyKey();
+        key.FormatId = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3");
+        key.PropertyId = 5;
+        return key;
+    }
+
+    // The taskbar groups windows by this ID. Without it GameBoost is "Windows PowerShell" there.
+    public static bool SetProcessAppId(string appId) {
+        try { return SetCurrentProcessExplicitAppUserModelID(appId) == 0; } catch { return false; }
+    }
+
+    // { target, arguments, working folder, icon file, taskbar ID }, or null when the file cannot be read.
+    public static string[] ReadShortcut(string path) {
+        object link = null;
+        try {
+            link = new CShellLink();
+            ((System.Runtime.InteropServices.ComTypes.IPersistFile)link).Load(path, 0);
+            var shell = (IShellLinkW)link;
+            var target = new StringBuilder(1024);
+            var arguments = new StringBuilder(4096);
+            var folder = new StringBuilder(1024);
+            var icon = new StringBuilder(1024);
+            int iconIndex;
+            shell.GetPath(target, target.Capacity, IntPtr.Zero, 0);
+            shell.GetArguments(arguments, arguments.Capacity);
+            shell.GetWorkingDirectory(folder, folder.Capacity);
+            shell.GetIconLocation(icon, icon.Capacity, out iconIndex);
+            string appId = "";
+            var key = AppIdKey();
+            PropVariant value;
+            ((IPropertyStore)link).GetValue(ref key, out value);
+            try { if (value.VarType == VtLpwstr && value.Pointer != IntPtr.Zero) appId = Marshal.PtrToStringUni(value.Pointer); }
+            finally { PropVariantClear(ref value); }
+            return new string[] { target.ToString(), arguments.ToString(), folder.ToString(), icon.ToString(), appId };
+        } catch { return null; }
+        finally { if (link != null) Marshal.FinalReleaseComObject(link); }
+    }
+
+    // Creates a shortcut, or updates an existing one. An empty argument leaves that part as it is
+    // (PowerShell passes $null to a string parameter as "", so null and "" must mean the same here).
+    public static bool WriteShortcut(string path, string target, string arguments, string workingDirectory,
+                                     string iconPath, string description, string appId) {
+        object link = null;
+        try {
+            link = new CShellLink();
+            var file = (System.Runtime.InteropServices.ComTypes.IPersistFile)link;
+            bool exists = File.Exists(path);
+            if (exists) file.Load(path, 2);
+            else if (string.IsNullOrEmpty(target)) return false;
+            var shell = (IShellLinkW)link;
+            if (!string.IsNullOrEmpty(target)) shell.SetPath(target);
+            if (!string.IsNullOrEmpty(arguments)) shell.SetArguments(arguments);
+            if (!string.IsNullOrEmpty(workingDirectory)) shell.SetWorkingDirectory(workingDirectory);
+            if (!string.IsNullOrEmpty(iconPath)) shell.SetIconLocation(iconPath, 0);
+            if (!string.IsNullOrEmpty(description)) shell.SetDescription(description);
+            if (!string.IsNullOrEmpty(appId)) {
+                var store = (IPropertyStore)link;
+                var key = AppIdKey();
+                var value = new PropVariant();
+                value.VarType = VtLpwstr;
+                value.Pointer = Marshal.StringToCoTaskMemUni(appId);
+                try { store.SetValue(ref key, ref value); store.Commit(); }
+                finally { PropVariantClear(ref value); }
+            }
+            // Never save a shortcut that would start nothing.
+            var check = new StringBuilder(1024);
+            shell.GetPath(check, check.Capacity, IntPtr.Zero, 0);
+            if (check.Length == 0) return false;
+            file.Save(path, true);
+            return true;
+        } catch { return false; }
+        finally { if (link != null) Marshal.FinalReleaseComObject(link); }
+    }
+
+    // Windows' documented way to empty the recent documents list (Recent folder, Quick Access
+    // recent files, Start "Recommended", jump list recent entries). Pinned items are kept.
+    public static void ClearRecentDocuments() {
+        SHAddToRecentDocs(1, IntPtr.Zero);
     }
 }
